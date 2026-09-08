@@ -1,0 +1,16 @@
+name: keygate
+
+services:
+  keygate:
+    image: ghcr.io/paltaio/keygate:latest
+    container_name: keygate
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./data:/data
+    networks:
+      - apps
+
+networks:
+  apps:
+    external: true

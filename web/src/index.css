@@ -1,0 +1,135 @@
+@import "tailwindcss";
+@import "@fontsource-variable/instrument-sans";
+@import "@fontsource-variable/jetbrains-mono";
+
+@theme {
+  --font-sans: "Instrument Sans Variable", "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "JetBrains Mono Variable", ui-monospace, Menlo, Consolas, monospace;
+
+  --color-*: initial;
+  --color-surface-base: oklch(96.5% 0.006 80);
+  --color-surface-raised: oklch(99% 0.003 80);
+  --color-surface-sunken: oklch(93.5% 0.01 80);
+  --color-surface-ink: oklch(25% 0.015 80);
+  --color-content-default: oklch(25% 0.015 80);
+  --color-content-muted: oklch(46% 0.02 80);
+  --color-content-faint: oklch(56% 0.02 80);
+  --color-content-on-ink: oklch(96.5% 0.006 80);
+  --color-content-on-accent: oklch(98.5% 0.01 80);
+  --color-border-subtle: oklch(88% 0.01 80);
+  --color-border-strong: oklch(60% 0.02 80);
+  --color-accent-primary: oklch(47% 0.12 65);
+  --color-accent-hover: oklch(42% 0.12 65);
+  --color-accent-soft: oklch(92% 0.04 75);
+  --color-accent-bright: oklch(78% 0.13 75);
+  --color-status-ok: oklch(48% 0.11 150);
+  --color-status-ok-soft: oklch(95% 0.03 150);
+  --color-status-critical: oklch(50% 0.17 28);
+  --color-status-critical-soft: oklch(95% 0.03 28);
+
+  --radius-*: initial;
+  --radius-ctl: 4px;
+
+  --shadow-*: initial;
+  --shadow-overlay: 0 16px 40px -12px oklch(25% 0.015 80 / 0.4);
+
+  --ease-*: initial;
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+:root {
+  color-scheme: light;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-size: 15px;
+  line-height: 1.5;
+  background: var(--color-surface-base);
+  color: var(--color-content-default);
+  -webkit-font-smoothing: antialiased;
+}
+
+h1,
+h2,
+h3 {
+  line-height: 1.2;
+  letter-spacing: -0.01em;
+}
+
+::selection {
+  background: var(--color-accent-soft);
+  color: var(--color-content-default);
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-accent-primary);
+  outline-offset: 2px;
+}
+
+code,
+pre,
+.font-mono {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "liga" 0;
+}
+
+dialog::backdrop {
+  background: oklch(25% 0.015 80 / 0.45);
+}
+
+@layer components {
+  .tbl {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.875rem;
+  }
+  .tbl th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    text-align: left;
+    font-weight: 500;
+    font-size: 0.6875rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    white-space: nowrap;
+    color: var(--color-content-muted);
+    background: var(--color-surface-sunken);
+    padding: 0.5rem 0.75rem;
+    border-bottom: 1px solid var(--color-border-subtle);
+  }
+  .tbl td {
+    padding: 0.5rem 0.75rem;
+    border-bottom: 1px solid var(--color-border-subtle);
+    vertical-align: top;
+  }
+  .tbl tbody tr:last-child td {
+    border-bottom: 0;
+  }
+  .tbl .num {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+  .tbl .actions {
+    text-align: right;
+    white-space: nowrap;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
+}
