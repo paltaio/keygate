@@ -21,6 +21,7 @@ app.use("*", async (c, next) => {
   await next();
 });
 
+app.get("/", (c) => c.redirect("/admin"));
 app.get("/health", (c) => c.json({ ok: true }));
 app.route("/api", adminRoutes(store, env));
 
