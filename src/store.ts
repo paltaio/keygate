@@ -383,6 +383,21 @@ export class Store {
       .all(upstreamId);
   }
 
+  /** Renames a credential and merges values: a string sets one, null removes one, absent leaves it. */
+  updateKey(id: number, input: { label?: string | undefined; secrets?: Record<string, string | null> | undefined }): boolean {
+    const key = this.keyById(id);
+    if (!key || key.revoked_at) return false;
+    const secrets = parseSecrets(key.secrets);
+    for (const [name, value] of Object.entries(input.secrets ?? {})) {
+      if (value === null) delete secrets[name];
+      else secrets[name] = value;
+    }
+    this.db
+      .query<never, [string, string, number]>("UPDATE provider_keys SET label = ?, secrets = ? WHERE id = ?")
+      .run(input.label ?? key.label, JSON.stringify(secrets), id);
+    return true;
+  }
+
   setKeyEnabled(id: number, enabled: boolean): boolean {
     return (
       this.db
@@ -645,6 +660,11 @@ export function placeholderNames(placements: Placement[]): string[] {
     }
   }
   return names;
+}
+
+/** Placeholder names the placements need that the credential does not hold. */
+export function missingSecrets(placements: Placement[], secrets: Record<string, string>): string[] {
+  return placeholderNames(placements).filter((n) => !(n in secrets));
 }
 
 export function renderTemplate(template: string, secrets: Record<string, string>): string {

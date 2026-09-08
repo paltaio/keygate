@@ -23,6 +23,8 @@ export interface ProviderKey {
   upstream_id: number;
   label: string;
   hints: Record<string, string>;
+  /** Placeholder names the placements need that this credential does not hold. */
+  missing: string[];
   active: number;
   enabled: number;
   failing_at: string | null;
@@ -190,7 +192,7 @@ export const api = {
     add: (upstreamId: number, input: { label: string; secrets: Record<string, string>; activate: boolean }) =>
       request<ProviderKey>("POST", `/upstreams/${upstreamId}/keys`, input),
     activate: (id: number) => request<{ ok: true }>("POST", `/keys/${id}/activate`),
-    setEnabled: (id: number, enabled: boolean) => request<ProviderKey>("PATCH", `/keys/${id}`, { enabled }),
+    update: (id: number, patch: { label?: string; secrets?: Record<string, string | null>; enabled?: boolean }) => request<ProviderKey>("PATCH", `/keys/${id}`, patch),
     revoke: (id: number) => request<{ ok: true }>("DELETE", `/keys/${id}`),
   },
   tokens: {

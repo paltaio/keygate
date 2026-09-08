@@ -87,6 +87,7 @@ export function NewUpstreamPage() {
       <PageHeader title="New upstream" description="Credentials are added on the upstream page after it is created." />
       <Panel>
         <UpstreamForm
+          mode="create"
           submitLabel="Create upstream"
           onSubmit={async (input) => {
             const created = await api.upstreams.create(input);

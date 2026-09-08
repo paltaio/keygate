@@ -195,6 +195,28 @@ describe("proxy", () => {
     expect(c.captured[0]?.headers.get("x-client")).toBe("keygate");
   });
 
+  test("round robin skips incomplete credentials; editing completes one", async () => {
+    const two: Placement[] = [
+      { type: "header", name: "authorization", value: "Bearer {{token}}" },
+      { type: "header", name: "x-api-key", value: "{{key}}" },
+    ];
+    const c = setup(two, undefined, { token: "T1", key: "K1" });
+    const upstream = c.store.upstreamBySlug("up");
+    if (!upstream) throw new Error("upstream missing");
+    c.store.updateUpstream(upstream.id, { slug: "up", name: "Up", base_url: "https://up.example/base", placements: two, strategy: "round_robin", notes: "" });
+    const partial = c.store.addKey(upstream.id, "k2", { token: "T2" }, false, 1);
+    const call = async () => {
+      await (await c.proxy(new Request("http://keygate.test/up/x", { headers: { "x-keygate-token": c.token } }))).text();
+      return c.captured.at(-1)?.headers.get("x-api-key");
+    };
+    expect([await call(), await call()]).toEqual(["K1", "K1"]);
+    expect(c.store.updateKey(partial, { secrets: { key: "K2" } })).toBe(true);
+    expect([await call(), await call()]).toEqual(["K1", "K2"]);
+    expect(c.store.updateKey(partial, { label: "renamed", secrets: { key: null } })).toBe(true);
+    expect(c.store.keyById(partial)?.label).toBe("renamed");
+    expect([await call(), await call()]).toEqual(["K1", "K1"]);
+  });
+
   test("credential lacking a placeholder value is a 503", async () => {
     const c = setup([{ type: "header", name: "authorization", value: "Bearer {{token}}" }], undefined, { key: "K" });
     const res = await c.proxy(new Request("http://keygate.test/up/x", { headers: { "x-keygate-token": c.token } }));

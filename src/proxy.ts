@@ -1,6 +1,6 @@
 import type { Env } from "./env.ts";
 import { bodyKinds, extractToken, inject, parseCookies, serializeBody, serializeCookies, type Carrier, type ParsedBody } from "./inject.ts";
-import { MissingSecretError, RESERVED_SLUGS, parseList, parsePlacements, parseSecrets, placeholderNames, type ProviderKey, type Store, type Upstream } from "./store.ts";
+import { MissingSecretError, RESERVED_SLUGS, missingSecrets, parseList, parsePlacements, parseSecrets, placeholderNames, type Placement, type ProviderKey, type Store, type Upstream } from "./store.ts";
 
 /** A credential flagged by the provider sits out of the round-robin pool for this long. */
 const FAILING_COOLDOWN_MS = 5 * 60_000;
@@ -113,9 +113,9 @@ export function createProxy(options: ProxyOptions): (req: Request) => Promise<Re
   const doFetch = options.fetch ?? fetch;
   const turns = new Map<number, number>();
 
-  function pickKey(upstream: Upstream): ProviderKey | null {
+  function pickKey(upstream: Upstream, placements: Placement[]): ProviderKey | null {
     if (upstream.strategy !== "round_robin") return store.activeKey(upstream.id);
-    const pool = store.liveKeys(upstream.id);
+    const pool = store.liveKeys(upstream.id).filter((k) => missingSecrets(placements, parseSecrets(k.secrets)).length === 0);
     if (!pool.length) return null;
     const cutoff = Date.now() - FAILING_COOLDOWN_MS;
     const healthy = pool.filter((k) => !k.failing_at || Date.parse(k.failing_at) < cutoff);
@@ -200,7 +200,7 @@ export function createProxy(options: ProxyOptions): (req: Request) => Promise<Re
       if (!origins.includes("*") && !origins.includes(origin)) return reject(token.id, 403, "origin_not_allowed", "This token does not allow requests from this origin", body.bytes);
     }
 
-    const key = pickKey(upstream);
+    const key = pickKey(upstream, placements);
     if (!key && placeholderNames(placements).length) return reject(token.id, 503, "no_active_key", `${upstream.slug} has no enabled credential to use`, body.bytes);
     try {
       inject(carrier, placements, key ? parseSecrets(key.secrets) : {});

@@ -39,6 +39,12 @@ export function CredentialCell({ upstream, now }: { upstream: Upstream; now: num
           {hintsSummary(key.hints)}
         </Mono>
       </p>
+      {key.missing.length ? (
+        <p className="mt-1">
+          <Pill tone="critical">Missing: {key.missing.join(", ")}</Pill>
+          <span className="ml-1.5 text-xs text-content-muted">Requests get 503 until filled in.</span>
+        </p>
+      ) : null}
       {key.failing_at ? (
         <p className="mt-1">
           <Pill tone="critical" title={formatDateTime(key.failing_at)}>

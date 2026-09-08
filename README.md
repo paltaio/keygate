@@ -30,8 +30,10 @@ in a urlencoded body) and a value template such as `Bearer {{token}}` or
 `{{api_key}}`. A credential is the set of named values the templates need; a
 provider that wants an API key in one header and a client id in the body is one
 upstream with two placements and one credential holding both values. Templates
-without placeholders are sent as constants. Rotation adds a new credential with
-all values and makes it active; the old one stays inactive until revoked.
+without placeholders are sent as constants. A credential can be saved with
+values missing and filled in later; until it holds every value the placements
+need it is flagged and not used. Rotation adds a new credential with all values
+and makes it active; the old one stays inactive until revoked.
 
 Each upstream has a strategy. `active` sends every request with the one active
 credential. `round_robin` takes turns across all enabled credentials, and a
