@@ -26,6 +26,7 @@ function Origins({ origins }: { origins: string[] }) {
 
 function TokenStatus({ t, now }: { t: Token; now: number }) {
   if (t.revoked_at) return <Pill title={formatDateTime(t.revoked_at)}>Revoked {formatDate(t.revoked_at)}</Pill>;
+  if (t.enabled !== 1) return <Pill tone="critical">Disabled</Pill>;
   if (isPast(t.expires_at, now)) return <Pill tone="critical">Expired</Pill>;
   return <Pill tone="ok">Live</Pill>;
 }
@@ -38,13 +39,17 @@ export function TokensPage() {
     setRevoking(null);
     load.reload();
   });
+  const toggle = useAction(async (t: Token) => {
+    await api.tokens.setEnabled(t.id, t.enabled !== 1);
+    load.reload();
+  });
   const data = load.data;
 
   return (
     <>
       <PageHeader
         title="Tokens"
-        description="What consumers send instead of the provider key. Each token names the upstreams and browser origins it may use."
+        description="What consumers send instead of the provider credential. Each token names the upstreams and browser origins it may use."
         actions={
           <LinkButton href="/tokens/new" variant="primary">
             Create token
@@ -52,6 +57,11 @@ export function TokensPage() {
         }
       />
       {load.error ? <LoadError message={load.error} onRetry={load.reload} /> : null}
+      {toggle.error ? (
+        <Notice kind="error" className="mb-4">
+          {toggle.error}
+        </Notice>
+      ) : null}
       <Panel bleed>
         <table className="tbl">
           <thead>
@@ -73,7 +83,7 @@ export function TokensPage() {
               <TableMessage colSpan={8}>{load.error ? "Nothing to show." : "Loading tokens..."}</TableMessage>
             ) : data.length === 0 ? (
               <TableMessage colSpan={8}>
-                <p>No tokens yet. Create one and hand it to a consumer instead of the provider key.</p>
+                <p>No tokens yet. Create one and hand it to a consumer instead of the provider credential.</p>
                 <div className="mt-3">
                   <LinkButton href="/tokens/new" variant="primary">
                     Create token
@@ -112,6 +122,9 @@ export function TokensPage() {
                           <LinkButton size="sm" variant="quiet" href={`/tokens/${t.id}`}>
                             Edit
                           </LinkButton>
+                          <Button size="sm" variant="quiet" onClick={() => void toggle.run(t)} disabled={toggle.busy}>
+                            {t.enabled === 1 ? "Disable" : "Enable"}
+                          </Button>
                           <Button size="sm" variant="quiet" className="text-status-critical hover:text-status-critical" onClick={() => setRevoking(t)}>
                             Revoke
                           </Button>
@@ -156,8 +169,8 @@ function CreatedTokenPanel({ created, onCreateAnother }: { created: CreatedToken
         <CopyButton value={created.token} label="Copy token" size="md" />
       </div>
       <p className="mt-4 text-sm text-content-muted">
-        Consumers send it as <Mono>Authorization: Bearer {"<token>"}</Mono>, in the <Mono>X-Keygate-Token</Mono> header, as <Mono>?keygate_token=</Mono>, or in the
-        upstream's own key slot.
+        Consumers send it as <Mono>Authorization: Bearer {"<token>"}</Mono>, in the <Mono>X-Keygate-Token</Mono> header, as <Mono>?keygate_token=</Mono>, or in place
+        of any placement value.
       </p>
       <div className="mt-5 flex gap-2">
         <LinkButton href="/tokens" variant="primary">

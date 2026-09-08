@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import { loadEnv } from "./env.ts";
 import { createProxy, resolveTarget } from "./proxy.ts";
-import { Store } from "./store.ts";
+import { Store, type Placement } from "./store.ts";
 
 const env = loadEnv({ KEYGATE_HOST: "keygate.test", KEYGATE_DATA_DIR: ":memory:" });
 
@@ -26,20 +26,14 @@ interface Captured {
   body: string;
 }
 
-function setup(upstream: { slot_type: "header" | "query" | "cookie" | "json" | "form"; slot_name: string; slot_prefix?: string }, respond?: () => Response) {
+const apiKeyHeader: Placement[] = [{ type: "header", name: "x-api-key", value: "{{key}}" }];
+
+function setup(placements: Placement[], respond?: () => Response, secrets: Record<string, string> = { key: "REAL" }) {
   const store = new Store(":memory:");
   const captured: Captured[] = [];
-  const upstreamId = store.createUpstream({
-    slug: "up",
-    name: "Up",
-    base_url: "https://up.example/base",
-    slot_type: upstream.slot_type,
-    slot_name: upstream.slot_name,
-    slot_prefix: upstream.slot_prefix ?? "",
-    notes: "",
-  });
+  const upstreamId = store.createUpstream({ slug: "up", name: "Up", base_url: "https://up.example/base", placements, strategy: "active", notes: "" });
   const userId = store.createUser("a@b.c", "A", "x");
-  const keyId = store.addKey(upstreamId, "k1", "REAL", true, userId);
+  const keyId = store.addKey(upstreamId, "k1", secrets, true, userId);
   const { token } = store.createToken({ name: "t", scopes: ["up"], origins: ["https://app.test"], expires_at: null }, userId);
   const proxy = createProxy({
     store,
@@ -56,7 +50,7 @@ function setup(upstream: { slot_type: "header" | "query" | "cookie" | "json" | "
 describe("proxy", () => {
   let ctx: ReturnType<typeof setup>;
   beforeEach(() => {
-    ctx = setup({ slot_type: "header", slot_name: "x-api-key" });
+    ctx = setup(apiKeyHeader);
   });
 
   test("swaps the token for the key, joins the path, strips hop headers", async () => {
@@ -131,7 +125,7 @@ describe("proxy", () => {
 
   test("upstream 401 flags the key, 200 clears it", async () => {
     let status = 401;
-    const c = setup({ slot_type: "header", slot_name: "x-api-key" }, () => new Response("x", { status }));
+    const c = setup(apiKeyHeader, () => new Response("x", { status }));
     await (await c.proxy(new Request("http://keygate.test/up/x", { headers: { "x-keygate-token": c.token } }))).text();
     expect(c.store.keyById(c.keyId)?.failing_status).toBe(401);
     status = 200;
@@ -140,7 +134,7 @@ describe("proxy", () => {
   });
 
   test("upstream failure is a 502 with a log row", async () => {
-    const c = setup({ slot_type: "header", slot_name: "x-api-key" }, () => {
+    const c = setup(apiKeyHeader, () => {
       throw new Error("connect ECONNREFUSED");
     });
     const res = await c.proxy(new Request("http://keygate.test/up/x", { headers: { "x-keygate-token": c.token } }));
@@ -149,25 +143,97 @@ describe("proxy", () => {
   });
 
   test("query, cookie, json and form slots", async () => {
-    const q = setup({ slot_type: "query", slot_name: "key" });
+    const q = setup([{ type: "query", name: "key", value: "{{key}}" }]);
     await q.proxy(new Request(`http://keygate.test/up/x?key=${q.token}&a=1`));
     expect(q.captured[0]?.url).toBe("https://up.example/base/x?a=1&key=REAL");
 
-    const ck = setup({ slot_type: "cookie", slot_name: "sid" });
+    const ck = setup([{ type: "cookie", name: "sid", value: "{{key}}" }]);
     await ck.proxy(new Request("http://keygate.test/up/x", { headers: { cookie: `sid=${ck.token}` } }));
     expect(ck.captured[0]?.headers.get("cookie")).toBe("sid=REAL");
 
-    const j = setup({ slot_type: "json", slot_name: "api_key" });
+    const j = setup([{ type: "json", name: "api_key", value: "{{key}}" }]);
     await j.proxy(new Request("http://keygate.test/up/x", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ api_key: j.token, q: 1 }) }));
     expect(JSON.parse(j.captured[0]?.body ?? "")).toEqual({ q: 1, api_key: "REAL" });
 
-    const f = setup({ slot_type: "form", slot_name: "api_key" });
+    const f = setup([{ type: "form", name: "api_key", value: "{{key}}" }]);
     await f.proxy(new Request("http://keygate.test/up/x", { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: `api_key=${f.token}&q=1` }));
     expect(f.captured[0]?.body).toBe("q=1&api_key=REAL");
 
-    const bad = setup({ slot_type: "json", slot_name: "api_key" });
+    const bad = setup([{ type: "json", name: "api_key", value: "{{key}}" }]);
     const res = await bad.proxy(new Request("http://keygate.test/up/x", { method: "POST", headers: { "content-type": "application/json", "x-keygate-token": bad.token }, body: "[1]" }));
     expect(res.status).toBe(400);
+  });
+
+  test("several placements filled from one credential", async () => {
+    const multi: Placement[] = [
+      { type: "header", name: "authorization", value: "Bearer {{token}}" },
+      { type: "header", name: "x-api-key", value: "{{key}}" },
+      { type: "query", name: "client", value: "{{client_id}}" },
+      { type: "json", name: "client_secret", value: "{{client_secret}}" },
+    ];
+    const c = setup(multi, undefined, { token: "T", key: "K", client_id: "C", client_secret: "S" });
+    const res = await c.proxy(
+      new Request("http://keygate.test/up/x?a=1", {
+        method: "POST",
+        headers: { authorization: `Bearer ${c.token}`, "content-type": "application/json" },
+        body: JSON.stringify({ q: 1 }),
+      }),
+    );
+    expect(res.status).toBe(200);
+    const sent = c.captured[0];
+    expect(sent?.url).toBe("https://up.example/base/x?a=1&client=C");
+    expect(sent?.headers.get("authorization")).toBe("Bearer T");
+    expect(sent?.headers.get("x-api-key")).toBe("K");
+    expect(JSON.parse(sent?.body ?? "")).toEqual({ q: 1, client_secret: "S" });
+  });
+
+  test("constant-only placements need no credential", async () => {
+    const c = setup([{ type: "header", name: "x-client", value: "keygate" }]);
+    c.store.revokeKey(c.keyId);
+    const res = await c.proxy(new Request("http://keygate.test/up/x", { headers: { "x-keygate-token": c.token } }));
+    expect(res.status).toBe(200);
+    expect(c.captured[0]?.headers.get("x-client")).toBe("keygate");
+  });
+
+  test("credential lacking a placeholder value is a 503", async () => {
+    const c = setup([{ type: "header", name: "authorization", value: "Bearer {{token}}" }], undefined, { key: "K" });
+    const res = await c.proxy(new Request("http://keygate.test/up/x", { headers: { "x-keygate-token": c.token } }));
+    expect(res.status).toBe(503);
+    expect(c.store.requests({ limit: 1 })[0]?.error).toBe("credential_incomplete");
+  });
+
+  test("disabled token and disabled active credential", async () => {
+    const tokenId = ctx.store.tokens()[0]?.id ?? 0;
+    ctx.store.setTokenEnabled(tokenId, false);
+    expect((await ctx.proxy(new Request("http://keygate.test/up/x", { headers: { "x-keygate-token": ctx.token } }))).status).toBe(401);
+    expect(ctx.store.originAllowed("up", "https://app.test")).toBe(false);
+    ctx.store.setTokenEnabled(tokenId, true);
+    ctx.store.setKeyEnabled(ctx.keyId, false);
+    expect((await ctx.proxy(new Request("http://keygate.test/up/x", { headers: { "x-keygate-token": ctx.token } }))).status).toBe(503);
+    ctx.store.setKeyEnabled(ctx.keyId, true);
+    expect((await ctx.proxy(new Request("http://keygate.test/up/x", { headers: { "x-keygate-token": ctx.token } }))).status).toBe(200);
+  });
+
+  test("round robin takes turns and sits out a flagged credential", async () => {
+    let status = 200;
+    const c = setup(apiKeyHeader, () => new Response("x", { status }));
+    const upstream = c.store.upstreamBySlug("up");
+    if (!upstream) throw new Error("upstream missing");
+    c.store.updateUpstream(upstream.id, { slug: "up", name: "Up", base_url: "https://up.example/base", placements: apiKeyHeader, strategy: "round_robin", notes: "" });
+    const k2 = c.store.addKey(upstream.id, "k2", { key: "SECOND" }, false, 1);
+    c.store.addKey(upstream.id, "k3", { key: "THIRD" }, false, 1);
+    const call = async () => {
+      await (await c.proxy(new Request("http://keygate.test/up/x", { headers: { "x-keygate-token": c.token } }))).text();
+      return c.captured.at(-1)?.headers.get("x-api-key");
+    };
+    expect([await call(), await call(), await call(), await call()]).toEqual(["REAL", "SECOND", "THIRD", "REAL"]);
+    status = 401;
+    expect(await call()).toBe("SECOND");
+    status = 200;
+    expect([await call(), await call(), await call()]).toEqual(["THIRD", "REAL", "THIRD"]);
+    c.store.setKeyEnabled(k2, false);
+    c.store.setKeyEnabled(ctx.keyId, true);
+    expect(c.store.liveKeys(upstream.id).map((k) => k.label)).toEqual(["k1", "k3"]);
   });
 
   test("streams the upstream body through", async () => {
@@ -178,7 +244,7 @@ describe("proxy", () => {
         controller.close();
       },
     });
-    const c = setup({ slot_type: "header", slot_name: "x-api-key" }, () => new Response(stream, { headers: { "content-type": "text/event-stream" } }));
+    const c = setup(apiKeyHeader, () => new Response(stream, { headers: { "content-type": "text/event-stream" } }));
     const res = await c.proxy(new Request("http://keygate.test/up/x", { headers: { "x-keygate-token": c.token } }));
     expect(await res.text()).toBe("data: a\n\ndata: b\n\n");
     expect(c.store.requests({ limit: 1 })[0]?.bytes_out).toBe(18);

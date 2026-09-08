@@ -1,4 +1,4 @@
-import type { RequestRow, RequestStatus, SlotType } from "./api.ts";
+import type { Placement, PlacementType, RequestRow, RequestStatus } from "./api.ts";
 
 const pad = (n: number): string => String(n).padStart(2, "0");
 
@@ -70,48 +70,79 @@ export function fromLocalInput(value: string): string | null {
   return Number.isNaN(d.getTime()) ? null : d.toISOString();
 }
 
-export const SLOT_HELP: Record<SlotType, string> = {
-  header: "Sent as a request header. The prefix goes in front of the key.",
-  query: "Added to the request URL as a query parameter.",
-  cookie: "Added to the Cookie request header.",
-  json: "Set as a top-level field of the JSON object body.",
-  form: "Set as a field of the form-encoded body.",
+export const PLACEMENT_TYPE_LABEL: Record<PlacementType, string> = {
+  header: "Header",
+  query: "Query parameter",
+  cookie: "Cookie",
+  json: "JSON body field",
+  form: "Form body field",
 };
 
-export const SLOT_NAME_HINT: Record<SlotType, string> = {
-  header: "Header name, for example Authorization or X-API-Key.",
-  query: "Query parameter name, for example api_key.",
-  cookie: "Cookie name.",
-  json: "Field name in the JSON body.",
-  form: "Field name in the form body.",
+export const PLACEMENT_NAME_HINT: Record<PlacementType, string> = {
+  header: "Header name",
+  query: "Parameter name",
+  cookie: "Cookie name",
+  json: "Field name",
+  form: "Field name",
 };
 
-export interface SlotShape {
-  slot_type: SlotType;
-  slot_name: string;
-  slot_prefix: string;
+const PLACEHOLDER = /\{\{\s*([A-Za-z0-9_]+)\s*\}\}/g;
+
+export interface TemplateSegment {
+  text: string;
+  placeholder: boolean;
 }
 
-/** Text around the key once it is injected: [before, after]. */
-export function slotParts(slot: SlotShape): [string, string] {
-  const name = slot.slot_name || "name";
-  switch (slot.slot_type) {
+/** Splits a template into literal text and placeholder names. */
+export function templateSegments(template: string): TemplateSegment[] {
+  const out: TemplateSegment[] = [];
+  let last = 0;
+  for (const m of template.matchAll(PLACEHOLDER)) {
+    const start = m.index ?? 0;
+    if (start > last) out.push({ text: template.slice(last, start), placeholder: false });
+    out.push({ text: m[1] ?? "", placeholder: true });
+    last = start + m[0].length;
+  }
+  if (last < template.length) out.push({ text: template.slice(last), placeholder: false });
+  return out;
+}
+
+/** Every placeholder the placements reference, in first-seen order. */
+export function placeholderNames(placements: Placement[]): string[] {
+  const names: string[] = [];
+  for (const p of placements) {
+    for (const s of templateSegments(p.value)) if (s.placeholder && !names.includes(s.text)) names.push(s.text);
+  }
+  return names;
+}
+
+/** Text that precedes the template when the placement is written. */
+export function placementPrefix(p: Placement): string {
+  const name = p.name || "name";
+  switch (p.type) {
     case "header":
-      return [`${name}: ${slot.slot_prefix}`, ""];
+      return `${name}: `;
     case "query":
-      return [`?${name}=`, ""];
+      return `?${name}=`;
     case "cookie":
-      return [`Cookie: ${name}=`, ""];
+      return `Cookie: ${name}=`;
     case "json":
-      return [`{"${name}": "`, `"}`];
+      return `body.${name} = `;
     case "form":
-      return [`${name}=`, ""];
+      return `${name}=`;
   }
 }
 
-export function slotSummary(slot: SlotShape): string {
-  const [before, after] = slotParts(slot);
-  return `${before}<key>${after}`;
+/** One-line form of a placement with placeholders shown as <name>. */
+export function placementSummary(p: Placement): string {
+  return placementPrefix(p) + templateSegments(p.value).map((s) => (s.placeholder ? `<${s.text}>` : s.text)).join("");
+}
+
+/** "token sk-...TKEY, key ab...wxyz" for a credential's masked values. */
+export function hintsSummary(hints: Record<string, string>): string {
+  return Object.entries(hints)
+    .map(([name, hint]) => `${name} ${hint}`)
+    .join(", ");
 }
 
 export function upstreamUrls(slug: string): [string, string] {

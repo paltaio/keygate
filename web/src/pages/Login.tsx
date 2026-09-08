@@ -21,7 +21,7 @@ export default function Login({ onSignedIn }: { onSignedIn: (user: User) => void
       >
         <div>
           <Wordmark className="text-2xl" />
-          <p className="mt-1 text-sm text-content-muted">Sign in to manage upstreams, provider keys and consumer tokens.</p>
+          <p className="mt-1 text-sm text-content-muted">Sign in to manage upstreams, credentials and consumer tokens.</p>
         </div>
         <Field label="Email" htmlFor="email">
           <Input id="email" type="email" autoComplete="username" required value={email} onChange={(e) => setEmail(e.target.value)} autoFocus />

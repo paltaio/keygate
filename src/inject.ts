@@ -1,19 +1,13 @@
-import { TOKEN_PREFIX, type SlotType } from "./store.ts";
+import { TOKEN_PREFIX, renderTemplate, type Placement } from "./store.ts";
 
 export const TOKEN_HEADER = "x-keygate-token";
 export const TOKEN_QUERY = "keygate_token";
-
-export interface Slot {
-  type: SlotType;
-  name: string;
-  prefix: string;
-}
 
 export type ParsedBody =
   | { kind: "json"; value: Record<string, unknown> }
   | { kind: "form"; value: URLSearchParams };
 
-/** The outgoing request while the consumer token is swapped for the provider key. */
+/** The outgoing request while the consumer token is swapped for the provider credential. */
 export interface Carrier {
   url: URL;
   headers: Headers;
@@ -22,11 +16,6 @@ export interface Carrier {
 
 export function isToken(value: string): boolean {
   return value.startsWith(TOKEN_PREFIX);
-}
-
-function stripPrefix(value: string, prefix: string): string {
-  if (!prefix) return value.trim();
-  return value.toLowerCase().startsWith(prefix.toLowerCase()) ? value.slice(prefix.length).trim() : value.trim();
 }
 
 export function parseCookies(header: string | null): Map<string, string> {
@@ -44,12 +33,89 @@ export function serializeCookies(cookies: Map<string, string>): string {
   return [...cookies].map(([k, v]) => `${k}=${v}`).join("; ");
 }
 
+/** Which body encodings the placements need parsed. */
+export function bodyKinds(placements: Placement[]): { json: boolean; form: boolean } {
+  return { json: placements.some((p) => p.type === "json"), form: placements.some((p) => p.type === "form") };
+}
+
+function readLocation(carrier: Carrier, p: Placement): string | undefined {
+  switch (p.type) {
+    case "header":
+      return carrier.headers.get(p.name) ?? undefined;
+    case "query":
+      return carrier.url.searchParams.get(p.name) ?? undefined;
+    case "cookie":
+      return parseCookies(carrier.headers.get("cookie")).get(p.name);
+    case "json": {
+      const value = carrier.body?.kind === "json" ? carrier.body.value[p.name] : undefined;
+      return typeof value === "string" ? value : undefined;
+    }
+    case "form":
+      return carrier.body?.kind === "form" ? (carrier.body.value.get(p.name) ?? undefined) : undefined;
+  }
+}
+
+function writeLocation(carrier: Carrier, p: Placement, value: string): void {
+  switch (p.type) {
+    case "header":
+      carrier.headers.set(p.name, value);
+      return;
+    case "query":
+      carrier.url.searchParams.set(p.name, value);
+      return;
+    case "cookie": {
+      const cookies = parseCookies(carrier.headers.get("cookie"));
+      cookies.set(p.name, value);
+      carrier.headers.set("cookie", serializeCookies(cookies));
+      return;
+    }
+    case "json":
+      if (carrier.body?.kind === "json") carrier.body.value[p.name] = value;
+      return;
+    case "form":
+      if (carrier.body?.kind === "form") carrier.body.value.set(p.name, value);
+      return;
+  }
+}
+
+function clearLocation(carrier: Carrier, p: Placement): void {
+  switch (p.type) {
+    case "header":
+      carrier.headers.delete(p.name);
+      return;
+    case "query":
+      carrier.url.searchParams.delete(p.name);
+      return;
+    case "cookie": {
+      const cookies = parseCookies(carrier.headers.get("cookie"));
+      cookies.delete(p.name);
+      if (cookies.size) carrier.headers.set("cookie", serializeCookies(cookies));
+      else carrier.headers.delete("cookie");
+      return;
+    }
+    case "json":
+      if (carrier.body?.kind === "json") delete carrier.body.value[p.name];
+      return;
+    case "form":
+      if (carrier.body?.kind === "form") carrier.body.value.delete(p.name);
+      return;
+  }
+}
+
+/** The literal text around the first placeholder of a template, or undefined when it has none. */
+function affixes(template: string): { prefix: string; suffix: string } | undefined {
+  const start = template.indexOf("{{");
+  const end = template.indexOf("}}", start);
+  if (start < 0 || end < 0) return undefined;
+  return { prefix: template.slice(0, start), suffix: template.slice(end + 2) };
+}
+
 /**
  * Finds the consumer token, removes it from the request, and returns it.
  * Looked up in order: the keygate header, a bearer Authorization header, the keygate query
- * parameter, then the slot the upstream itself uses for its key.
+ * parameter, then each placement location, where the token may stand in for the credential.
  */
-export function extractToken(carrier: Carrier, slot: Slot): string | undefined {
+export function extractToken(carrier: Carrier, placements: Placement[]): string | undefined {
   const dedicated = carrier.headers.get(TOKEN_HEADER);
   if (dedicated) {
     carrier.headers.delete(TOKEN_HEADER);
@@ -57,7 +123,7 @@ export function extractToken(carrier: Carrier, slot: Slot): string | undefined {
   }
   const auth = carrier.headers.get("authorization");
   if (auth) {
-    const bearer = stripPrefix(auth, "Bearer ");
+    const bearer = auth.replace(/^bearer\s+/i, "").trim();
     if (isToken(bearer)) {
       carrier.headers.delete("authorization");
       return bearer;
@@ -68,69 +134,24 @@ export function extractToken(carrier: Carrier, slot: Slot): string | undefined {
     carrier.url.searchParams.delete(TOKEN_QUERY);
     return query;
   }
-  switch (slot.type) {
-    case "header": {
-      const value = carrier.headers.get(slot.name);
-      if (!value) return undefined;
-      const candidate = stripPrefix(value, slot.prefix);
-      if (!isToken(candidate)) return undefined;
-      carrier.headers.delete(slot.name);
-      return candidate;
-    }
-    case "query": {
-      const value = carrier.url.searchParams.get(slot.name);
-      if (!value || !isToken(value)) return undefined;
-      carrier.url.searchParams.delete(slot.name);
-      return value;
-    }
-    case "cookie": {
-      const cookies = parseCookies(carrier.headers.get("cookie"));
-      const value = cookies.get(slot.name);
-      if (!value || !isToken(value)) return undefined;
-      cookies.delete(slot.name);
-      if (cookies.size) carrier.headers.set("cookie", serializeCookies(cookies));
-      else carrier.headers.delete("cookie");
-      return value;
-    }
-    case "json": {
-      if (carrier.body?.kind !== "json") return undefined;
-      const value = carrier.body.value[slot.name];
-      if (typeof value !== "string" || !isToken(value)) return undefined;
-      delete carrier.body.value[slot.name];
-      return value;
-    }
-    case "form": {
-      if (carrier.body?.kind !== "form") return undefined;
-      const value = carrier.body.value.get(slot.name);
-      if (!value || !isToken(value)) return undefined;
-      carrier.body.value.delete(slot.name);
-      return value;
-    }
+  for (const p of placements) {
+    const fix = affixes(p.value);
+    if (!fix) continue;
+    const raw = readLocation(carrier, p);
+    if (raw === undefined) continue;
+    const lower = raw.toLowerCase();
+    if (!lower.startsWith(fix.prefix.toLowerCase()) || !lower.endsWith(fix.suffix.toLowerCase())) continue;
+    const inner = raw.slice(fix.prefix.length, raw.length - fix.suffix.length).trim();
+    if (!isToken(inner)) continue;
+    clearLocation(carrier, p);
+    return inner;
   }
+  return undefined;
 }
 
-/** Puts the provider key where the upstream expects it. */
-export function inject(carrier: Carrier, slot: Slot, secret: string): void {
-  switch (slot.type) {
-    case "header":
-      carrier.headers.set(slot.name, `${slot.prefix}${secret}`);
-      return;
-    case "query":
-      carrier.url.searchParams.set(slot.name, secret);
-      return;
-    case "cookie": {
-      const cookies = parseCookies(carrier.headers.get("cookie"));
-      cookies.set(slot.name, secret);
-      carrier.headers.set("cookie", serializeCookies(cookies));
-      return;
-    }
-    case "json":
-      if (carrier.body?.kind === "json") carrier.body.value[slot.name] = secret;
-      return;
-    case "form":
-      if (carrier.body?.kind === "form") carrier.body.value.set(slot.name, secret);
-      return;
-  }
+/** Writes every placement with its template filled from the credential. Throws MissingSecretError. */
+export function inject(carrier: Carrier, placements: Placement[], secrets: Record<string, string>): void {
+  for (const p of placements) writeLocation(carrier, p, renderTemplate(p.value, secrets));
 }
 
 export function serializeBody(body: ParsedBody): { text: string; contentType: string } {

@@ -1,6 +1,9 @@
 import type { Env } from "./env.ts";
-import { extractToken, inject, parseCookies, serializeBody, serializeCookies, type Carrier, type ParsedBody } from "./inject.ts";
-import { RESERVED_SLUGS, parseList, type Store, type Upstream } from "./store.ts";
+import { bodyKinds, extractToken, inject, parseCookies, serializeBody, serializeCookies, type Carrier, type ParsedBody } from "./inject.ts";
+import { MissingSecretError, RESERVED_SLUGS, parseList, parsePlacements, parseSecrets, placeholderNames, type ProviderKey, type Store, type Upstream } from "./store.ts";
+
+/** A credential flagged by the provider sits out of the round-robin pool for this long. */
+const FAILING_COOLDOWN_MS = 5 * 60_000;
 
 export const SESSION_COOKIE = "kg_session";
 
@@ -68,10 +71,10 @@ function corsHeaders(origin: string, req: Request): Record<string, string> {
   };
 }
 
-async function readBody(req: Request, slotType: Upstream["slot_type"]): Promise<{ parsed?: ParsedBody; raw?: ArrayBuffer; bytes: number }> {
+async function readBody(req: Request, wants: { json: boolean; form: boolean }): Promise<{ parsed?: ParsedBody; raw?: ArrayBuffer; bytes: number }> {
   if (req.method === "GET" || req.method === "HEAD") return { bytes: 0 };
   const contentType = req.headers.get("content-type") ?? "";
-  if (slotType === "json" && contentType.includes("application/json")) {
+  if (wants.json && contentType.includes("application/json")) {
     const text = await req.text();
     const value: unknown = text.trim() ? JSON.parse(text) : {};
     if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -79,7 +82,7 @@ async function readBody(req: Request, slotType: Upstream["slot_type"]): Promise<
     }
     return { parsed: { kind: "json", value: value as Record<string, unknown> }, bytes: text.length };
   }
-  if (slotType === "form" && contentType.includes("application/x-www-form-urlencoded")) {
+  if (wants.form && contentType.includes("application/x-www-form-urlencoded")) {
     const text = await req.text();
     return { parsed: { kind: "form", value: new URLSearchParams(text) }, bytes: text.length };
   }
@@ -108,6 +111,19 @@ export interface ProxyOptions {
 export function createProxy(options: ProxyOptions): (req: Request) => Promise<Response> {
   const { store, env } = options;
   const doFetch = options.fetch ?? fetch;
+  const turns = new Map<number, number>();
+
+  function pickKey(upstream: Upstream): ProviderKey | null {
+    if (upstream.strategy !== "round_robin") return store.activeKey(upstream.id);
+    const pool = store.liveKeys(upstream.id);
+    if (!pool.length) return null;
+    const cutoff = Date.now() - FAILING_COOLDOWN_MS;
+    const healthy = pool.filter((k) => !k.failing_at || Date.parse(k.failing_at) < cutoff);
+    const candidates = healthy.length ? healthy : pool;
+    const turn = turns.get(upstream.id) ?? 0;
+    turns.set(upstream.id, turn + 1);
+    return candidates[turn % candidates.length] ?? null;
+  }
 
   return async function handle(req: Request): Promise<Response> {
     const url = new URL(req.url);
@@ -159,9 +175,10 @@ export function createProxy(options: ProxyOptions): (req: Request) => Promise<Re
       else headers.delete("cookie");
     }
 
+    const placements = parsePlacements(upstream.placements);
     let body: Awaited<ReturnType<typeof readBody>>;
     try {
-      body = await readBody(req, upstream.slot_type);
+      body = await readBody(req, bodyKinds(placements));
     } catch (e) {
       if (e instanceof ProxyError) return reject(null, e.status, e.code, e.message, 0);
       return reject(null, 400, "invalid_body", "The request body could not be parsed", 0);
@@ -169,12 +186,12 @@ export function createProxy(options: ProxyOptions): (req: Request) => Promise<Re
 
     const carrier: Carrier = { url: joinUrl(upstream.base_url, target.path, url.search), headers };
     if (body.parsed) carrier.body = body.parsed;
-    const slot = { type: upstream.slot_type, name: upstream.slot_name, prefix: upstream.slot_prefix };
 
-    const tokenValue = extractToken(carrier, slot);
+    const tokenValue = extractToken(carrier, placements);
     if (!tokenValue) return reject(null, 401, "missing_token", "Send a keygate token in X-Keygate-Token, Authorization: Bearer, ?keygate_token, or the upstream's own key slot", body.bytes);
     const token = store.tokenByValue(tokenValue);
     if (!token || token.revoked_at) return reject(token?.id ?? null, 401, "invalid_token", "This token is unknown or revoked", body.bytes);
+    if (!token.enabled) return reject(token.id, 401, "disabled_token", "This token is disabled", body.bytes);
     if (token.expires_at && token.expires_at <= new Date().toISOString()) return reject(token.id, 401, "expired_token", "This token has expired", body.bytes);
     const scopes = parseList(token.scopes);
     if (!scopes.includes("*") && !scopes.includes(upstream.slug)) return reject(token.id, 403, "upstream_not_in_scope", `This token is not scoped to ${upstream.slug}`, body.bytes);
@@ -183,9 +200,14 @@ export function createProxy(options: ProxyOptions): (req: Request) => Promise<Re
       if (!origins.includes("*") && !origins.includes(origin)) return reject(token.id, 403, "origin_not_allowed", "This token does not allow requests from this origin", body.bytes);
     }
 
-    const key = store.activeKey(upstream.id);
-    if (!key) return reject(token.id, 503, "no_active_key", `${upstream.slug} has no active provider key`, body.bytes);
-    inject(carrier, slot, key.secret);
+    const key = pickKey(upstream);
+    if (!key && placeholderNames(placements).length) return reject(token.id, 503, "no_active_key", `${upstream.slug} has no enabled credential to use`, body.bytes);
+    try {
+      inject(carrier, placements, key ? parseSecrets(key.secrets) : {});
+    } catch (e) {
+      if (e instanceof MissingSecretError) return reject(token.id, 503, "credential_incomplete", e.message, body.bytes);
+      throw e;
+    }
     store.touchToken(token.id);
 
     let outBody: string | ArrayBuffer | null = null;
@@ -211,7 +233,7 @@ export function createProxy(options: ProxyOptions): (req: Request) => Promise<Re
       return reject(token.id, 502, "upstream_unreachable", message, body.bytes);
     }
 
-    store.markKeyResult(key.id, res.status);
+    if (key) store.markKeyResult(key.id, res.status);
 
     const outHeaders = new Headers();
     for (const [name, value] of res.headers) if (!RESPONSE_STRIP.has(name)) outHeaders.append(name, value);

@@ -14,17 +14,33 @@ client -- X-Keygate-Token: kg_... -->  keygate  -- x-api-key: <real key> -->  ap
 1. The upstream is picked from the host (`exa.keygate.example.com`) or the first
    path segment (`keygate.example.com/exa/...`).
 2. The consumer token is read from `X-Keygate-Token`, from
-   `Authorization: Bearer kg_...`, from `?keygate_token=`, or from the slot the
-   upstream itself uses for its key. That last form is what lets SDKs work
-   unchanged: point the SDK's base URL at keygate and hand it the consumer token
-   as its "API key".
+   `Authorization: Bearer kg_...`, from `?keygate_token=`, or from any place
+   the upstream itself expects a credential value. That last form is what lets
+   SDKs work unchanged: point the SDK's base URL at keygate and hand it the
+   consumer token as its "API key".
 3. The token must be live, scoped to that upstream, and, for browser requests,
    list the page's origin.
-4. The token is stripped, the active provider key is put in the upstream's slot,
-   and the request is forwarded. Responses stream back as they arrive.
+4. The token is stripped, every placement of the upstream is written with the
+   active credential, and the request is forwarded. Responses stream back as
+   they arrive.
 
-Slots: `header` (with an optional prefix such as `Bearer `), `query`, `cookie`,
-`json` (a field in a JSON object body), `form` (a field in a urlencoded body).
+An upstream has one or more placements. Each names a location (`header`,
+`query`, `cookie`, `json` for a field in a JSON object body, `form` for a field
+in a urlencoded body) and a value template such as `Bearer {{token}}` or
+`{{api_key}}`. A credential is the set of named values the templates need; a
+provider that wants an API key in one header and a client id in the body is one
+upstream with two placements and one credential holding both values. Templates
+without placeholders are sent as constants. Rotation adds a new credential with
+all values and makes it active; the old one stays inactive until revoked.
+
+Each upstream has a strategy. `active` sends every request with the one active
+credential. `round_robin` takes turns across all enabled credentials, and a
+credential the provider rejected with 401 or 403 sits out for five minutes.
+Credentials and consumer tokens can be disabled and re-enabled; revoking is
+permanent.
+
+The consumer token may stand in for any placement value: `Authorization: Bearer
+kg_...` against a `Bearer {{token}}` template is recognized and replaced.
 
 ## Run it
 
@@ -34,7 +50,7 @@ docker compose up -d
 ```
 
 The dashboard is at `https://<KEYGATE_HOST>/admin`. Data lives in `./data`.
-Provider keys are stored as plain text in the SQLite file, so treat the volume
+Credentials are stored as plain text in the SQLite file, so treat the volume
 like the keys themselves.
 
 For subdomain routing, point `*.<KEYGATE_HOST>` at the same service as the bare
@@ -70,8 +86,8 @@ upstream; the real request is checked against the token that carries it.
   Google Maps JavaScript API, cannot be proxied. Server-side endpoints can.
 - Responses are passed through as-is. A provider that returns absolute URLs to
   itself (pagination links) hands the client links that bypass keygate.
-- `json` and `form` slots re-serialize the body. Header, query and cookie slots
-  forward the bytes untouched.
+- `json` and `form` placements re-serialize the body. Header, query and cookie
+  placements forward the bytes untouched.
 - Multipart bodies are forwarded untouched, so a key cannot be injected into a
   multipart field.
 

@@ -1,5 +1,15 @@
-export const SLOT_TYPES = ["header", "query", "cookie", "json", "form"] as const;
-export type SlotType = (typeof SLOT_TYPES)[number];
+export const PLACEMENT_TYPES = ["header", "query", "cookie", "json", "form"] as const;
+export type PlacementType = (typeof PLACEMENT_TYPES)[number];
+
+/** One location on the outgoing request; `value` is a template where `{{name}}` is filled from the active credential. */
+export interface Placement {
+  type: PlacementType;
+  name: string;
+  value: string;
+}
+
+export const STRATEGIES = ["active", "round_robin"] as const;
+export type Strategy = (typeof STRATEGIES)[number];
 
 export interface User {
   id: number;
@@ -12,8 +22,9 @@ export interface ProviderKey {
   id: number;
   upstream_id: number;
   label: string;
-  hint: string;
+  hints: Record<string, string>;
   active: number;
+  enabled: number;
   failing_at: string | null;
   failing_status: number | null;
   last_used_at: string | null;
@@ -26,9 +37,8 @@ export interface UpstreamInput {
   slug: string;
   name: string;
   base_url: string;
-  slot_type: SlotType;
-  slot_name: string;
-  slot_prefix: string;
+  placements: Placement[];
+  strategy: Strategy;
   notes: string;
 }
 
@@ -36,8 +46,12 @@ export interface Upstream extends UpstreamInput {
   id: number;
   created_at: string;
   updated_at: string;
+  /** Placeholder names the placements need, in first-seen order. */
+  secret_names: string[];
   active_key: ProviderKey | null;
   key_count: number;
+  /** Credentials that can serve: 1 or 0 in active mode, the pool size in round_robin. */
+  usable_key_count: number;
 }
 
 export interface UpstreamDetail extends Upstream {
@@ -68,6 +82,7 @@ export interface TokenInput {
 export interface Token extends TokenInput {
   id: number;
   hint: string;
+  enabled: number;
   revoked_at: string | null;
   created_by: number | null;
   created_at: string;
@@ -172,15 +187,17 @@ export const api = {
     remove: (id: number) => request<{ ok: true }>("DELETE", `/upstreams/${id}`),
   },
   keys: {
-    add: (upstreamId: number, input: { label: string; secret: string; activate: boolean }) =>
+    add: (upstreamId: number, input: { label: string; secrets: Record<string, string>; activate: boolean }) =>
       request<ProviderKey>("POST", `/upstreams/${upstreamId}/keys`, input),
     activate: (id: number) => request<{ ok: true }>("POST", `/keys/${id}/activate`),
+    setEnabled: (id: number, enabled: boolean) => request<ProviderKey>("PATCH", `/keys/${id}`, { enabled }),
     revoke: (id: number) => request<{ ok: true }>("DELETE", `/keys/${id}`),
   },
   tokens: {
     list: () => request<Token[]>("GET", "/tokens"),
     create: (input: TokenInput) => request<CreatedToken>("POST", "/tokens", input),
     update: (id: number, input: TokenInput) => request<Token>("PATCH", `/tokens/${id}`, input),
+    setEnabled: (id: number, enabled: boolean) => request<Token>("PATCH", `/tokens/${id}/enabled`, { enabled }),
     revoke: (id: number) => request<{ ok: true }>("DELETE", `/tokens/${id}`),
   },
   requests: (filter: RequestFilter) => request<RequestRow[]>("GET", `/requests${query(filter)}`),

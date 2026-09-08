@@ -1,8 +1,9 @@
 import { useLocation } from "wouter";
 import { api } from "../api.ts";
-import { formatCount, slotSummary } from "../format.ts";
+import { CredentialCell } from "../credential.tsx";
+import { formatCount, placementSummary } from "../format.ts";
 import { useLoad } from "../hooks.ts";
-import { LinkButton, LoadError, Mono, PageHeader, Panel, Pill, TableMessage, TextLink } from "../ui.tsx";
+import { LinkButton, LoadError, Mono, PageHeader, Panel, TableMessage, TextLink } from "../ui.tsx";
 import UpstreamForm from "./UpstreamForm.tsx";
 
 export function UpstreamsPage() {
@@ -12,7 +13,7 @@ export function UpstreamsPage() {
     <>
       <PageHeader
         title="Upstreams"
-        description="Third-party APIs keygate fronts, each with the provider key it injects."
+        description="Third-party APIs keygate fronts, each with the credential it injects."
         actions={
           <LinkButton href="/upstreams/new" variant="primary">
             Add upstream
@@ -26,9 +27,9 @@ export function UpstreamsPage() {
             <tr>
               <th>Upstream</th>
               <th>Base URL</th>
-              <th>Key slot</th>
-              <th>Active key</th>
-              <th className="num">Keys</th>
+              <th>Placements</th>
+              <th>In use</th>
+              <th className="num">Credentials</th>
             </tr>
           </thead>
           <tbody>
@@ -58,22 +59,15 @@ export function UpstreamsPage() {
                     </Mono>
                   </td>
                   <td>
-                    <Mono className="block max-w-[32ch] truncate" title={slotSummary(u)}>
-                      {slotSummary(u)}
-                    </Mono>
+                    {u.placements.slice(0, 2).map((p, i) => (
+                      <Mono key={i} className="block max-w-[32ch] truncate" title={placementSummary(p)}>
+                        {placementSummary(p)}
+                      </Mono>
+                    ))}
+                    {u.placements.length > 2 ? <span className="text-xs text-content-muted">+{u.placements.length - 2} more</span> : null}
                   </td>
                   <td>
-                    {u.active_key ? (
-                      <span className="flex flex-wrap items-center gap-1.5">
-                        <span className="truncate" title={u.active_key.label}>
-                          {u.active_key.label}
-                        </span>
-                        <Mono className="text-content-muted">{u.active_key.hint}</Mono>
-                        {u.active_key.failing_at ? <Pill tone="critical">Rejected with {u.active_key.failing_status ?? "?"}</Pill> : null}
-                      </span>
-                    ) : (
-                      <Pill tone="critical">None</Pill>
-                    )}
+                    <CredentialCell upstream={u} now={load.at} />
                   </td>
                   <td className="num">{formatCount(u.key_count)}</td>
                 </tr>
@@ -90,7 +84,7 @@ export function NewUpstreamPage() {
   const [, navigate] = useLocation();
   return (
     <>
-      <PageHeader title="New upstream" description="Provider keys are added on the upstream page after it is created." />
+      <PageHeader title="New upstream" description="Credentials are added on the upstream page after it is created." />
       <Panel>
         <UpstreamForm
           submitLabel="Create upstream"

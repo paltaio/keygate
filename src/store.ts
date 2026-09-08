@@ -1,7 +1,17 @@
 import { Database } from "bun:sqlite";
 
-export const SLOT_TYPES = ["header", "query", "cookie", "json", "form"] as const;
-export type SlotType = (typeof SLOT_TYPES)[number];
+export const PLACEMENT_TYPES = ["header", "query", "cookie", "json", "form"] as const;
+export type PlacementType = (typeof PLACEMENT_TYPES)[number];
+
+/** Where one value goes on the outgoing request. `value` is a template; `{{name}}` is filled from the active credential. */
+export interface Placement {
+  type: PlacementType;
+  name: string;
+  value: string;
+}
+
+export const STRATEGIES = ["active", "round_robin"] as const;
+export type Strategy = (typeof STRATEGIES)[number];
 
 export interface User {
   id: number;
@@ -16,9 +26,10 @@ export interface Upstream {
   slug: string;
   name: string;
   base_url: string;
-  slot_type: SlotType;
-  slot_name: string;
-  slot_prefix: string;
+  /** JSON array of Placement. */
+  placements: string;
+  /** `active`: the one active credential serves every request. `round_robin`: enabled credentials take turns. */
+  strategy: Strategy;
   notes: string;
   created_at: string;
   updated_at: string;
@@ -28,8 +39,10 @@ export interface ProviderKey {
   id: number;
   upstream_id: number;
   label: string;
-  secret: string;
+  /** JSON object: placeholder name to secret value. */
+  secrets: string;
   active: number;
+  enabled: number;
   failing_at: string | null;
   failing_status: number | null;
   last_used_at: string | null;
@@ -49,6 +62,7 @@ export interface Token {
   origins: string;
   expires_at: string | null;
   revoked_at: string | null;
+  enabled: number;
   created_by: number | null;
   created_at: string;
   last_used_at: string | null;
@@ -88,9 +102,8 @@ CREATE TABLE IF NOT EXISTS upstreams (
   slug TEXT NOT NULL UNIQUE,
   name TEXT NOT NULL,
   base_url TEXT NOT NULL,
-  slot_type TEXT NOT NULL,
-  slot_name TEXT NOT NULL,
-  slot_prefix TEXT NOT NULL DEFAULT '',
+  placements TEXT NOT NULL,
+  strategy TEXT NOT NULL DEFAULT 'active',
   notes TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
@@ -99,8 +112,9 @@ CREATE TABLE IF NOT EXISTS provider_keys (
   id INTEGER PRIMARY KEY,
   upstream_id INTEGER NOT NULL REFERENCES upstreams(id) ON DELETE CASCADE,
   label TEXT NOT NULL,
-  secret TEXT NOT NULL,
+  secrets TEXT NOT NULL,
   active INTEGER NOT NULL DEFAULT 0,
+  enabled INTEGER NOT NULL DEFAULT 1,
   failing_at TEXT,
   failing_status INTEGER,
   last_used_at TEXT,
@@ -118,6 +132,7 @@ CREATE TABLE IF NOT EXISTS tokens (
   origins TEXT NOT NULL,
   expires_at TEXT,
   revoked_at TEXT,
+  enabled INTEGER NOT NULL DEFAULT 1,
   created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
   created_at TEXT NOT NULL,
   last_used_at TEXT
@@ -140,6 +155,13 @@ CREATE INDEX IF NOT EXISTS requests_ts ON requests(ts);
 CREATE INDEX IF NOT EXISTS requests_token ON requests(token_id, ts);
 CREATE INDEX IF NOT EXISTS requests_upstream ON requests(upstream_id, ts);
 `;
+
+/** Columns added after the first release; applied to databases created before them. */
+const ADDED_COLUMNS: Array<[table: string, column: string, ddl: string]> = [
+  ["upstreams", "strategy", "TEXT NOT NULL DEFAULT 'active'"],
+  ["provider_keys", "enabled", "INTEGER NOT NULL DEFAULT 1"],
+  ["tokens", "enabled", "INTEGER NOT NULL DEFAULT 1"],
+];
 
 export const RESERVED_SLUGS = new Set(["admin", "api", "health", "assets"]);
 
@@ -169,9 +191,8 @@ export interface UpstreamInput {
   slug: string;
   name: string;
   base_url: string;
-  slot_type: SlotType;
-  slot_name: string;
-  slot_prefix: string;
+  placements: Placement[];
+  strategy: Strategy;
   notes: string;
 }
 
@@ -222,6 +243,10 @@ export class Store {
     this.db.run("PRAGMA foreign_keys = ON");
     this.db.run("PRAGMA busy_timeout = 5000");
     this.db.exec(SCHEMA);
+    for (const [table, column, ddl] of ADDED_COLUMNS) {
+      const columns = this.db.query<{ name: string }, []>(`PRAGMA table_info(${table})`).all();
+      if (!columns.some((c) => c.name === column)) this.db.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`);
+    }
   }
 
   close(): void {
@@ -307,21 +332,21 @@ export class Store {
   createUpstream(input: UpstreamInput): number {
     const ts = now();
     const result = this.db
-      .query<never, [string, string, string, string, string, string, string, string, string]>(
-        `INSERT INTO upstreams (slug, name, base_url, slot_type, slot_name, slot_prefix, notes, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      .query<never, [string, string, string, string, string, string, string, string]>(
+        `INSERT INTO upstreams (slug, name, base_url, placements, strategy, notes, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(input.slug, input.name, input.base_url, input.slot_type, input.slot_name, input.slot_prefix, input.notes, ts, ts);
+      .run(input.slug, input.name, input.base_url, JSON.stringify(input.placements), input.strategy, input.notes, ts, ts);
     return Number(result.lastInsertRowid);
   }
 
   updateUpstream(id: number, input: UpstreamInput): boolean {
     const result = this.db
-      .query<never, [string, string, string, string, string, string, string, string, number]>(
-        `UPDATE upstreams SET slug = ?, name = ?, base_url = ?, slot_type = ?, slot_name = ?, slot_prefix = ?, notes = ?, updated_at = ?
+      .query<never, [string, string, string, string, string, string, string, number]>(
+        `UPDATE upstreams SET slug = ?, name = ?, base_url = ?, placements = ?, strategy = ?, notes = ?, updated_at = ?
          WHERE id = ?`,
       )
-      .run(input.slug, input.name, input.base_url, input.slot_type, input.slot_name, input.slot_prefix, input.notes, now(), id);
+      .run(input.slug, input.name, input.base_url, JSON.stringify(input.placements), input.strategy, input.notes, now(), id);
     return result.changes > 0;
   }
 
@@ -344,19 +369,36 @@ export class Store {
   activeKey(upstreamId: number): ProviderKey | null {
     return this.db
       .query<ProviderKey, [number]>(
-        "SELECT * FROM provider_keys WHERE upstream_id = ? AND active = 1 AND revoked_at IS NULL LIMIT 1",
+        "SELECT * FROM provider_keys WHERE upstream_id = ? AND active = 1 AND enabled = 1 AND revoked_at IS NULL LIMIT 1",
       )
       .get(upstreamId);
   }
 
-  addKey(upstreamId: number, label: string, secret: string, activate: boolean, createdBy: number): number {
+  /** Enabled, unrevoked credentials in creation order: the round-robin pool. */
+  liveKeys(upstreamId: number): ProviderKey[] {
+    return this.db
+      .query<ProviderKey, [number]>(
+        "SELECT * FROM provider_keys WHERE upstream_id = ? AND enabled = 1 AND revoked_at IS NULL ORDER BY id",
+      )
+      .all(upstreamId);
+  }
+
+  setKeyEnabled(id: number, enabled: boolean): boolean {
+    return (
+      this.db
+        .query<never, [number, number]>("UPDATE provider_keys SET enabled = ? WHERE id = ? AND revoked_at IS NULL")
+        .run(enabled ? 1 : 0, id).changes > 0
+    );
+  }
+
+  addKey(upstreamId: number, label: string, secrets: Record<string, string>, activate: boolean, createdBy: number): number {
     const insert = this.db.query<never, [number, string, string, number, number, string]>(
-      `INSERT INTO provider_keys (upstream_id, label, secret, active, created_by, created_at)
+      `INSERT INTO provider_keys (upstream_id, label, secrets, active, created_by, created_at)
        VALUES (?, ?, ?, ?, ?, ?)`,
     );
     const run = this.db.transaction(() => {
       if (activate) this.deactivateKeys(upstreamId);
-      return Number(insert.run(upstreamId, label, secret, activate ? 1 : 0, createdBy, now()).lastInsertRowid);
+      return Number(insert.run(upstreamId, label, JSON.stringify(secrets), activate ? 1 : 0, createdBy, now()).lastInsertRowid);
     });
     return run();
   }
@@ -459,6 +501,14 @@ export class Store {
     );
   }
 
+  setTokenEnabled(id: number, enabled: boolean): boolean {
+    return (
+      this.db
+        .query<never, [number, number]>("UPDATE tokens SET enabled = ? WHERE id = ? AND revoked_at IS NULL")
+        .run(enabled ? 1 : 0, id).changes > 0
+    );
+  }
+
   touchToken(id: number): void {
     this.db.query<never, [string, number]>("UPDATE tokens SET last_used_at = ? WHERE id = ?").run(now(), id);
   }
@@ -467,7 +517,7 @@ export class Store {
   originAllowed(slug: string, origin: string): boolean {
     const rows = this.db
       .query<Pick<Token, "scopes" | "origins">, [string]>(
-        "SELECT scopes, origins FROM tokens WHERE revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)",
+        "SELECT scopes, origins FROM tokens WHERE revoked_at IS NULL AND enabled = 1 AND (expires_at IS NULL OR expires_at > ?)",
       )
       .all(now());
     return rows.some((row) => {
@@ -556,6 +606,61 @@ export class Store {
 
   pruneSessions(): void {
     this.db.query<never, [string]>("DELETE FROM sessions WHERE expires_at <= ?").run(now());
+  }
+}
+
+export function parsePlacements(json: string): Placement[] {
+  try {
+    const value: unknown = JSON.parse(json);
+    if (!Array.isArray(value)) return [];
+    return value.filter(
+      (p): p is Placement =>
+        typeof p === "object" && p !== null && PLACEMENT_TYPES.includes((p as Placement).type) &&
+        typeof (p as Placement).name === "string" && typeof (p as Placement).value === "string",
+    );
+  } catch {
+    return [];
+  }
+}
+
+export function parseSecrets(json: string): Record<string, string> {
+  try {
+    const value: unknown = JSON.parse(json);
+    if (typeof value !== "object" || value === null || Array.isArray(value)) return {};
+    return Object.fromEntries(Object.entries(value).filter((e): e is [string, string] => typeof e[1] === "string"));
+  } catch {
+    return {};
+  }
+}
+
+const PLACEHOLDER = /\{\{\s*([A-Za-z0-9_]+)\s*\}\}/g;
+
+/** Every `{{name}}` referenced by the placements, in first-seen order. */
+export function placeholderNames(placements: Placement[]): string[] {
+  const names: string[] = [];
+  for (const p of placements) {
+    for (const m of p.value.matchAll(PLACEHOLDER)) {
+      const name = m[1];
+      if (name && !names.includes(name)) names.push(name);
+    }
+  }
+  return names;
+}
+
+export function renderTemplate(template: string, secrets: Record<string, string>): string {
+  return template.replace(PLACEHOLDER, (_, name: string) => {
+    const value = secrets[name];
+    if (value === undefined) throw new MissingSecretError(name);
+    return value;
+  });
+}
+
+export class MissingSecretError extends Error {
+  secret: string;
+  constructor(secret: string) {
+    super(`The active credential has no value for {{${secret}}}`);
+    this.name = "MissingSecretError";
+    this.secret = secret;
   }
 }
 

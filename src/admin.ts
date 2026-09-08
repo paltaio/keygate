@@ -3,7 +3,7 @@ import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { allowLoginAttempt, clearLoginAttempts, clientIp, endSession, requireUser, startSession, type AuthVariables } from "./auth.ts";
 import type { Env } from "./env.ts";
-import { RESERVED_SLUGS, SLOT_TYPES, parseList, secretHint, type ProviderKey, type Store, type Token, type Upstream } from "./store.ts";
+import { PLACEMENT_TYPES, RESERVED_SLUGS, STRATEGIES, parseList, parsePlacements, parseSecrets, placeholderNames, secretHint, type ProviderKey, type Store, type Token, type Upstream } from "./store.ts";
 
 const slug = z
   .string()
@@ -21,6 +21,14 @@ const origin = z.string().refine((value) => {
 
 const isoDate = z.iso.datetime({ offset: true });
 
+const secretName = z.string().regex(/^[A-Za-z0-9_]+$/, "letters, digits and underscores");
+
+const placement = z.object({
+  type: z.enum(PLACEMENT_TYPES),
+  name: z.string().min(1).max(200),
+  value: z.string().min(1).max(4000),
+});
+
 const schemas = {
   login: z.object({ email: z.email(), password: z.string().min(1) }),
   user: z.object({ email: z.email(), name: z.string().min(1).max(100), password: z.string().min(8).max(200) }),
@@ -29,12 +37,16 @@ const schemas = {
     slug,
     name: z.string().min(1).max(100),
     base_url: z.url({ protocol: /^https?$/ }),
-    slot_type: z.enum(SLOT_TYPES),
-    slot_name: z.string().min(1).max(200),
-    slot_prefix: z.string().max(50).default(""),
+    placements: z.array(placement).min(1).max(20),
+    strategy: z.enum(STRATEGIES).default("active"),
     notes: z.string().max(2000).default(""),
   }),
-  key: z.object({ label: z.string().min(1).max(100), secret: z.string().min(1).max(4000), activate: z.boolean().default(true) }),
+  enabled: z.object({ enabled: z.boolean() }),
+  key: z.object({
+    label: z.string().min(1).max(100),
+    secrets: z.record(secretName, z.string().min(1).max(4000)).refine((s) => Object.keys(s).length > 0, "at least one value"),
+    activate: z.boolean().default(true),
+  }),
   token: z.object({
     name: z.string().min(1).max(100),
     scopes: z.array(z.union([z.literal("*"), slug])).min(1),
@@ -72,9 +84,9 @@ function idParam(c: Context): number {
   return id;
 }
 
-export function keyView(key: ProviderKey): Omit<ProviderKey, "secret"> & { hint: string } {
-  const { secret, ...rest } = key;
-  return { ...rest, hint: secretHint(secret) };
+export function keyView(key: ProviderKey): Omit<ProviderKey, "secrets"> & { hints: Record<string, string> } {
+  const { secrets, ...rest } = key;
+  return { ...rest, hints: Object.fromEntries(Object.entries(parseSecrets(secrets)).map(([k, v]) => [k, secretHint(v)])) };
 }
 
 export function tokenView(token: Token): Omit<Token, "hash" | "scopes" | "origins"> & { scopes: string[]; origins: string[] } {
@@ -83,10 +95,33 @@ export function tokenView(token: Token): Omit<Token, "hash" | "scopes" | "origin
   return { ...rest, scopes: parseList(scopes), origins: parseList(origins) };
 }
 
-function upstreamView(store: Store, upstream: Upstream): Upstream & { active_key: ReturnType<typeof keyView> | null; key_count: number } {
+interface UpstreamView extends Omit<Upstream, "placements"> {
+  placements: ReturnType<typeof parsePlacements>;
+  secret_names: string[];
+  active_key: ReturnType<typeof keyView> | null;
+  key_count: number;
+  /** Credentials that can serve requests: the active one, or the round-robin pool. */
+  usable_key_count: number;
+}
+
+function upstreamView(store: Store, upstream: Upstream): UpstreamView {
   const keys = store.keysForUpstream(upstream.id);
   const active = keys.find((k) => k.active === 1 && !k.revoked_at);
-  return { ...upstream, active_key: active ? keyView(active) : null, key_count: keys.filter((k) => !k.revoked_at).length };
+  const placements = parsePlacements(upstream.placements);
+  const live = keys.filter((k) => !k.revoked_at && k.enabled === 1);
+  return {
+    ...upstream,
+    placements,
+    secret_names: placeholderNames(placements),
+    active_key: active && active.enabled === 1 ? keyView(active) : null,
+    key_count: keys.filter((k) => !k.revoked_at).length,
+    usable_key_count: upstream.strategy === "round_robin" ? live.length : active && active.enabled === 1 ? 1 : 0,
+  };
+}
+
+/** Names the placements need that the credential does not provide. */
+function missingSecrets(placements: ReturnType<typeof parsePlacements>, secrets: Record<string, string>): string[] {
+  return placeholderNames(placements).filter((n) => !(n in secrets));
 }
 
 export function adminRoutes(store: Store, env: Env): Hono<{ Variables: AuthVariables }> {
@@ -131,7 +166,7 @@ export function adminRoutes(store: Store, env: Env): Hono<{ Variables: AuthVaria
       since,
       upstreams,
       unmatched_requests: unknown?.requests ?? 0,
-      tokens: store.tokens().filter((t) => !t.revoked_at).length,
+      tokens: store.tokens().filter((t) => !t.revoked_at && t.enabled === 1).length,
     });
   });
 
@@ -181,6 +216,11 @@ export function adminRoutes(store: Store, env: Env): Hono<{ Variables: AuthVaria
     const input = await parseBody(c, schemas.upstream);
     const existing = store.upstreamBySlug(input.slug);
     if (existing && existing.id !== id) fail(409, "slug_taken", "An upstream with this slug exists");
+    const active = store.activeKey(id);
+    if (active) {
+      const missing = missingSecrets(input.placements, parseSecrets(active.secrets));
+      if (missing.length) fail(409, "secrets_missing", `The active credential has no value for: ${missing.join(", ")}. Add a credential with those values first.`);
+    }
     if (!store.updateUpstream(id, input)) fail(404, "not_found", "No such upstream");
     const updated = store.upstreamById(id);
     if (!updated) fail(404, "not_found", "No such upstream");
@@ -202,7 +242,9 @@ export function adminRoutes(store: Store, env: Env): Hono<{ Variables: AuthVaria
     const upstream = store.upstreamById(idParam(c));
     if (!upstream) fail(404, "not_found", "No such upstream");
     const input = await parseBody(c, schemas.key);
-    const id = store.addKey(upstream.id, input.label, input.secret, input.activate, c.get("user").id);
+    const missing = missingSecrets(parsePlacements(upstream.placements), input.secrets);
+    if (missing.length) fail(400, "secrets_missing", `Missing values for: ${missing.join(", ")}`);
+    const id = store.addKey(upstream.id, input.label, input.secrets, input.activate, c.get("user").id);
     const key = store.keyById(id);
     if (!key) fail(404, "not_found", "Key vanished after creation");
     return c.json(keyView(key), 201);
@@ -211,6 +253,15 @@ export function adminRoutes(store: Store, env: Env): Hono<{ Variables: AuthVaria
   app.post("/keys/:id/activate", (c) => {
     if (!store.activateKey(idParam(c))) fail(404, "not_found", "No such key, or it is revoked");
     return c.json({ ok: true });
+  });
+
+  app.patch("/keys/:id", async (c) => {
+    const id = idParam(c);
+    const input = await parseBody(c, schemas.enabled);
+    if (!store.setKeyEnabled(id, input.enabled)) fail(404, "not_found", "No such credential, or it is revoked");
+    const key = store.keyById(id);
+    if (!key) fail(404, "not_found", "No such credential");
+    return c.json(keyView(key));
   });
 
   app.delete("/keys/:id", (c) => {
@@ -235,6 +286,15 @@ export function adminRoutes(store: Store, env: Env): Hono<{ Variables: AuthVaria
     const updated = store.tokenById(id);
     if (!updated) fail(404, "not_found", "No such token");
     return c.json(tokenView(updated));
+  });
+
+  app.patch("/tokens/:id/enabled", async (c) => {
+    const id = idParam(c);
+    const input = await parseBody(c, schemas.enabled);
+    if (!store.setTokenEnabled(id, input.enabled)) fail(404, "not_found", "No such token, or it is revoked");
+    const token = store.tokenById(id);
+    if (!token) fail(404, "not_found", "No such token");
+    return c.json(tokenView(token));
   });
 
   app.delete("/tokens/:id", (c) => {
