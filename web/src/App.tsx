@@ -9,7 +9,8 @@ import UpstreamDetail from "./pages/UpstreamDetail.tsx";
 import { NewUpstreamPage, UpstreamsPage } from "./pages/Upstreams.tsx";
 import Users from "./pages/Users.tsx";
 import { SessionContext } from "./session.ts";
-import { Button, TextLink, Wordmark } from "./ui.tsx";
+import { THEMES, useTheme, type Theme } from "./theme.ts";
+import { Button, Select, TextLink, Wordmark } from "./ui.tsx";
 
 const NAV: { href: string; label: string }[] = [
   { href: "/", label: "Overview" },
@@ -34,6 +35,24 @@ function NavLink({ href, children }: { href: string; children: ReactNode }) {
     >
       {children}
     </Link>
+  );
+}
+
+const THEME_LABEL: Record<Theme, string> = { system: "System", light: "Light", dark: "Dark" };
+
+function ThemeSelect({ id }: { id: string }) {
+  const [theme, setTheme] = useTheme();
+  return (
+    <label className="flex items-center gap-2 text-xs text-content-muted">
+      <span>Theme</span>
+      <Select id={id} className="h-7 w-auto px-2 text-xs" value={theme} onChange={(e) => setTheme(e.target.value as Theme)}>
+        {THEMES.map((t) => (
+          <option key={t} value={t}>
+            {THEME_LABEL[t]}
+          </option>
+        ))}
+      </Select>
+    </label>
   );
 }
 
@@ -68,6 +87,9 @@ function Shell({ user, onSignOut }: { user: User; onSignOut: () => void }) {
             <p className="truncate text-xs text-content-muted" title={user.email}>
               {user.email}
             </p>
+            <div className="mt-3">
+              <ThemeSelect id="theme-sidebar" />
+            </div>
             <Button variant="quiet" size="sm" className="-ml-2.5 mt-2" onClick={signOut} busy={signingOut}>
               Sign out
             </Button>
@@ -90,11 +112,14 @@ function Shell({ user, onSignOut }: { user: User; onSignOut: () => void }) {
               </Route>
             </Switch>
           </div>
-          <div className="mt-8 flex items-center justify-between gap-3 px-1 text-xs text-content-muted md:hidden">
+          <div className="mt-8 flex flex-wrap items-center justify-between gap-3 px-1 text-xs text-content-muted md:hidden">
             <span className="truncate">{user.email}</span>
-            <Button variant="quiet" size="sm" onClick={signOut} busy={signingOut}>
-              Sign out
-            </Button>
+            <span className="flex items-center gap-3">
+              <ThemeSelect id="theme-footer" />
+              <Button variant="quiet" size="sm" onClick={signOut} busy={signingOut}>
+                Sign out
+              </Button>
+            </span>
           </div>
         </main>
       </div>

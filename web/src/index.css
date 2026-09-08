@@ -26,12 +26,15 @@
   --color-status-ok-soft: oklch(95% 0.03 150);
   --color-status-critical: oklch(50% 0.17 28);
   --color-status-critical-soft: oklch(95% 0.03 28);
+  --color-ink-edge: transparent;
+  --color-backdrop: oklch(25% 0.015 80 / 0.45);
 
   --radius-*: initial;
   --radius-ctl: 4px;
 
   --shadow-*: initial;
-  --shadow-overlay: 0 16px 40px -12px oklch(25% 0.015 80 / 0.4);
+  --shadow-overlay: 0 16px 40px -12px var(--color-shadow);
+  --color-shadow: oklch(25% 0.015 80 / 0.4);
 
   --ease-*: initial;
   --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
@@ -39,6 +42,90 @@
 
 :root {
   color-scheme: light;
+
+  --dark-surface-base: oklch(17% 0.008 80);
+  --dark-surface-raised: oklch(21.5% 0.009 80);
+  --dark-surface-sunken: oklch(14% 0.008 80);
+  --dark-surface-ink: oklch(9% 0.01 80);
+  --dark-content-default: oklch(90% 0.01 80);
+  --dark-content-muted: oklch(70% 0.015 80);
+  --dark-content-faint: oklch(63% 0.015 80);
+  --dark-content-on-ink: oklch(90% 0.01 80);
+  --dark-content-on-accent: oklch(15% 0.02 80);
+  --dark-border-subtle: oklch(28% 0.01 80);
+  --dark-border-strong: oklch(52% 0.015 80);
+  --dark-accent-primary: oklch(74% 0.13 70);
+  --dark-accent-hover: oklch(80% 0.13 70);
+  --dark-accent-soft: oklch(30% 0.06 70);
+  --dark-accent-bright: oklch(82% 0.13 75);
+  --dark-status-ok: oklch(76% 0.12 150);
+  --dark-status-ok-soft: oklch(26% 0.05 150);
+  --dark-status-critical: oklch(74% 0.15 28);
+  --dark-status-critical-soft: oklch(27% 0.06 28);
+  --dark-ink-edge: oklch(50% 0.02 80);
+  --dark-backdrop: oklch(5% 0.01 80 / 0.6);
+  --dark-shadow: oklch(0% 0 0 / 0.6);
+}
+
+/* The same token set, remapped. Explicit choice via data-theme; otherwise the system preference. */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --color-surface-base: var(--dark-surface-base);
+  --color-surface-raised: var(--dark-surface-raised);
+  --color-surface-sunken: var(--dark-surface-sunken);
+  --color-surface-ink: var(--dark-surface-ink);
+  --color-content-default: var(--dark-content-default);
+  --color-content-muted: var(--dark-content-muted);
+  --color-content-faint: var(--dark-content-faint);
+  --color-content-on-ink: var(--dark-content-on-ink);
+  --color-content-on-accent: var(--dark-content-on-accent);
+  --color-border-subtle: var(--dark-border-subtle);
+  --color-border-strong: var(--dark-border-strong);
+  --color-accent-primary: var(--dark-accent-primary);
+  --color-accent-hover: var(--dark-accent-hover);
+  --color-accent-soft: var(--dark-accent-soft);
+  --color-accent-bright: var(--dark-accent-bright);
+  --color-status-ok: var(--dark-status-ok);
+  --color-status-ok-soft: var(--dark-status-ok-soft);
+  --color-status-critical: var(--dark-status-critical);
+  --color-status-critical-soft: var(--dark-status-critical-soft);
+  --color-ink-edge: var(--dark-ink-edge);
+  --color-backdrop: var(--dark-backdrop);
+  --color-shadow: var(--dark-shadow);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --color-surface-base: var(--dark-surface-base);
+    --color-surface-raised: var(--dark-surface-raised);
+    --color-surface-sunken: var(--dark-surface-sunken);
+    --color-surface-ink: var(--dark-surface-ink);
+    --color-content-default: var(--dark-content-default);
+    --color-content-muted: var(--dark-content-muted);
+    --color-content-faint: var(--dark-content-faint);
+    --color-content-on-ink: var(--dark-content-on-ink);
+    --color-content-on-accent: var(--dark-content-on-accent);
+    --color-border-subtle: var(--dark-border-subtle);
+    --color-border-strong: var(--dark-border-strong);
+    --color-accent-primary: var(--dark-accent-primary);
+    --color-accent-hover: var(--dark-accent-hover);
+    --color-accent-soft: var(--dark-accent-soft);
+    --color-accent-bright: var(--dark-accent-bright);
+    --color-status-ok: var(--dark-status-ok);
+    --color-status-ok-soft: var(--dark-status-ok-soft);
+    --color-status-critical: var(--dark-status-critical);
+    --color-status-critical-soft: var(--dark-status-critical-soft);
+    --color-ink-edge: var(--dark-ink-edge);
+    --color-backdrop: var(--dark-backdrop);
+    --color-shadow: var(--dark-shadow);
+  }
+}
+
+html.theme-switching *,
+html.theme-switching *::before,
+html.theme-switching *::after {
+  transition: none !important;
 }
 
 html,
@@ -82,7 +169,7 @@ pre,
 }
 
 dialog::backdrop {
-  background: oklch(25% 0.015 80 / 0.45);
+  background: var(--color-backdrop);
 }
 
 @layer components {

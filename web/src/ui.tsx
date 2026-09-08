@@ -222,7 +222,7 @@ export function Mono({ children, className, title }: { children: ReactNode; clas
 
 export function InkBlock({ children, className }: { children: ReactNode; className?: string | undefined }) {
   return (
-    <pre className={cx("overflow-x-auto rounded-ctl bg-surface-ink px-3.5 py-2.5 font-mono text-[13px] leading-relaxed text-content-on-ink", className)}>
+    <pre className={cx("overflow-x-auto rounded-ctl border border-ink-edge bg-surface-ink px-3.5 py-2.5 font-mono text-[13px] leading-relaxed text-content-on-ink", className)}>
       {children}
     </pre>
   );
