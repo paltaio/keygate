@@ -50,7 +50,7 @@ an `Origin` that is on the token's origin list.
   turns across enabled credentials and benches one the provider rejected with
   401 or 403 for five minutes.
 - Token: `kg_...`, scoped to upstreams, with optional browser origins and
-  expiry. Shown once.
+  expiry. Shown once; rotate replaces the value and keeps the scopes.
 
 Responses stream through unchanged. Header, query and cookie placements forward
 the body byte for byte; `json` and `form` placements re-serialize it.

@@ -66,6 +66,7 @@ export interface Token {
   created_by: number | null;
   created_at: string;
   last_used_at: string | null;
+  rotated_at: string | null;
 }
 
 export interface ApiKey {
@@ -77,6 +78,7 @@ export interface ApiKey {
   created_at: string;
   last_used_at: string | null;
   revoked_at: string | null;
+  rotated_at: string | null;
 }
 
 export interface RequestLog {
@@ -146,7 +148,8 @@ CREATE TABLE IF NOT EXISTS tokens (
   enabled INTEGER NOT NULL DEFAULT 1,
   created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
   created_at TEXT NOT NULL,
-  last_used_at TEXT
+  last_used_at TEXT,
+  rotated_at TEXT
 );
 CREATE TABLE IF NOT EXISTS api_keys (
   id INTEGER PRIMARY KEY,
@@ -156,7 +159,8 @@ CREATE TABLE IF NOT EXISTS api_keys (
   created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
   created_at TEXT NOT NULL,
   last_used_at TEXT,
-  revoked_at TEXT
+  revoked_at TEXT,
+  rotated_at TEXT
 );
 CREATE TABLE IF NOT EXISTS requests (
   id INTEGER PRIMARY KEY,
@@ -182,6 +186,8 @@ const ADDED_COLUMNS: Array<[table: string, column: string, ddl: string]> = [
   ["upstreams", "strategy", "TEXT NOT NULL DEFAULT 'active'"],
   ["provider_keys", "enabled", "INTEGER NOT NULL DEFAULT 1"],
   ["tokens", "enabled", "INTEGER NOT NULL DEFAULT 1"],
+  ["tokens", "rotated_at", "TEXT"],
+  ["api_keys", "rotated_at", "TEXT"],
 ];
 
 export const RESERVED_SLUGS = new Set(["admin", "api", "health", "assets", "docs"]);
@@ -532,6 +538,17 @@ export class Store {
     );
   }
 
+  /** Replaces the secret of a live token in place; scopes, origins and expiry stay. Returns the new plaintext. */
+  rotateToken(id: number): string | null {
+    const token = randomToken();
+    const changed = this.db
+      .query<never, [string, string, string, number]>(
+        "UPDATE tokens SET hint = ?, hash = ?, rotated_at = ? WHERE id = ? AND revoked_at IS NULL",
+      )
+      .run(tokenHint(token), sha256(token), now(), id).changes;
+    return changed > 0 ? token : null;
+  }
+
   revokeToken(id: number): boolean {
     return (
       this.db
@@ -584,6 +601,17 @@ export class Store {
       )
       .run(name, tokenHint(key, API_KEY_PREFIX), sha256(key), createdBy, now());
     return { id: Number(result.lastInsertRowid), key };
+  }
+
+  /** Replaces the secret of a live API key in place. Returns the new plaintext. */
+  rotateApiKey(id: number): string | null {
+    const key = randomToken(API_KEY_PREFIX);
+    const changed = this.db
+      .query<never, [string, string, string, number]>(
+        "UPDATE api_keys SET hint = ?, hash = ?, rotated_at = ? WHERE id = ? AND revoked_at IS NULL",
+      )
+      .run(tokenHint(key, API_KEY_PREFIX), sha256(key), now(), id).changes;
+    return changed > 0 ? key : null;
   }
 
   revokeApiKey(id: number): boolean {

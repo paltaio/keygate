@@ -179,6 +179,16 @@ export function adminRoutes(store: Store, env: Env): Hono<{ Variables: AuthVaria
     return c.json({ ...rest, key }, 201);
   });
 
+  app.post("/api-keys/:id/rotate", (c) => {
+    const id = idParam(c);
+    const key = store.rotateApiKey(id);
+    const rotated = store.apiKeys().find((k) => k.id === id);
+    if (!key || !rotated) fail(404, "not_found", "No such API key, or it is revoked");
+    const { hash, ...rest } = rotated;
+    void hash;
+    return c.json({ ...rest, key });
+  });
+
   app.delete("/api-keys/:id", (c) => {
     if (!store.revokeApiKey(idParam(c))) fail(404, "not_found", "No such API key, or it is already revoked");
     return c.json({ ok: true });
@@ -313,6 +323,14 @@ export function adminRoutes(store: Store, env: Env): Hono<{ Variables: AuthVaria
     const updated = store.tokenById(id);
     if (!updated) fail(404, "not_found", "No such token");
     return c.json(tokenView(updated));
+  });
+
+  app.post("/tokens/:id/rotate", (c) => {
+    const id = idParam(c);
+    const token = store.rotateToken(id);
+    const rotated = store.tokenById(id);
+    if (!token || !rotated) fail(404, "not_found", "No such token, or it is revoked");
+    return c.json({ ...tokenView(rotated), token });
   });
 
   app.patch("/tokens/:id/enabled", async (c) => {

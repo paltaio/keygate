@@ -12,10 +12,10 @@ function envLines(origin: string, key: string | null): string {
   return [`KEYGATE_URL=${origin}`, `KEYGATE_API_KEY=${key ?? "kga_..."}`].join("\n");
 }
 
-function CreatedPanel({ created, onDone, onAnother }: { created: CreatedApiKey; onDone: () => void; onAnother: () => void }) {
+function CreatedPanel({ created, title, onDone, onAnother }: { created: CreatedApiKey; title: string; onDone: () => void; onAnother?: (() => void) | undefined }) {
   return (
-    <Panel title={`API key "${created.name}" created`}>
-      <Notice className="mb-4">Copy the key now. It is shown this once and cannot be retrieved later; create a new key if it is lost.</Notice>
+    <Panel title={title}>
+      <Notice className="mb-4">Copy the key now. It is shown this once and cannot be retrieved later; rotate the key if it is lost.</Notice>
       <div className="flex items-center gap-2">
         <InkBlock className="min-w-0 flex-1 select-all">{created.key}</InkBlock>
         <CopyButton value={created.key} label="Copy key" size="md" />
@@ -27,7 +27,7 @@ function CreatedPanel({ created, onDone, onAnother }: { created: CreatedApiKey; 
         <Button variant="primary" onClick={onDone}>
           Done
         </Button>
-        <Button onClick={onAnother}>Create another</Button>
+        {onAnother ? <Button onClick={onAnother}>Create another</Button> : null}
       </div>
     </Panel>
   );
@@ -86,9 +86,15 @@ export default function ApiKeys() {
   const load = useLoad("api-keys", api.apiKeys.list);
   const [created, setCreated] = useState<CreatedApiKey | null>(null);
   const [revoking, setRevoking] = useState<ApiKey | null>(null);
+  const [rotating, setRotating] = useState<ApiKey | null>(null);
   const revoke = useAction(async (id: number) => {
     await api.apiKeys.revoke(id);
     setRevoking(null);
+    load.reload();
+  });
+  const rotate = useAction(async (id: number) => {
+    setCreated(await api.apiKeys.rotate(id));
+    setRotating(null);
     load.reload();
   });
   const data = load.data;
@@ -102,11 +108,16 @@ export default function ApiKeys() {
         {created ? (
           <CreatedPanel
             created={created}
+            title={`API key "${created.name}" ${created.rotated_at ? "rotated" : "created"}`}
             onDone={() => setCreated(null)}
-            onAnother={() => {
-              setCreated(null);
-              document.getElementById("api-key-name")?.focus();
-            }}
+            onAnother={
+              created.rotated_at
+                ? undefined
+                : () => {
+                    setCreated(null);
+                    document.getElementById("api-key-name")?.focus();
+                  }
+            }
           />
         ) : (
           <Panel title="New API key">
@@ -146,16 +157,21 @@ export default function ApiKeys() {
                       </span>
                     </td>
                     <td>
-                      <Mono>{k.hint}</Mono>
+                      <Mono title={k.rotated_at ? `Rotated ${formatDateTime(k.rotated_at)}` : undefined}>{k.hint}</Mono>
                     </td>
                     <td title={formatDateTime(k.created_at)}>{formatDate(k.created_at)}</td>
                     <td title={k.last_used_at ? formatDateTime(k.last_used_at) : undefined}>{formatRelative(k.last_used_at, load.at)}</td>
                     <td>{k.revoked_at ? <Pill title={formatDateTime(k.revoked_at)}>Revoked {formatDate(k.revoked_at)}</Pill> : <Pill tone="ok">Live</Pill>}</td>
                     <td className="actions">
                       {k.revoked_at ? null : (
-                        <Button size="sm" variant="quiet" className="text-status-critical hover:text-status-critical" onClick={() => setRevoking(k)}>
-                          Revoke
-                        </Button>
+                        <span className="inline-flex gap-1">
+                          <Button size="sm" variant="quiet" onClick={() => setRotating(k)}>
+                            Rotate
+                          </Button>
+                          <Button size="sm" variant="quiet" className="text-status-critical hover:text-status-critical" onClick={() => setRevoking(k)}>
+                            Revoke
+                          </Button>
+                        </span>
                       )}
                     </td>
                   </tr>
@@ -181,7 +197,7 @@ export default function ApiKeys() {
                 <InkBlock className="min-w-0 flex-1">{envLines(origin, created?.key ?? null)}</InkBlock>
                 <CopyButton value={envLines(origin, created?.key ?? null)} />
               </div>
-              {created ? <p className="mt-2 text-sm text-content-muted">The key you just created is filled in above.</p> : null}
+              {created ? <p className="mt-2 text-sm text-content-muted">The key shown above is filled in.</p> : null}
             </div>
           </div>
         </Panel>
@@ -201,6 +217,22 @@ export default function ApiKeys() {
         }}
       >
         Requests signed with this key are refused from now on. This cannot be undone; create a new key to restore access.
+      </ConfirmDialog>
+      <ConfirmDialog
+        open={rotating !== null}
+        title={rotating ? `Rotate "${rotating.name}"?` : ""}
+        confirmLabel="Rotate API key"
+        busy={rotate.busy}
+        error={rotate.error}
+        onClose={() => {
+          setRotating(null);
+          rotate.reset();
+        }}
+        onConfirm={() => {
+          if (rotating) void rotate.run(rotating.id);
+        }}
+      >
+        A new key is generated and shown once. The current key is refused from now on; update the env file on the machine that uses it.
       </ConfirmDialog>
     </>
   );

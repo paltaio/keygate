@@ -61,10 +61,37 @@ describe("admin API keys", () => {
     expect((await app.request("/api/users/1", { method: "DELETE", headers: auth })).status).toBe(403);
   });
 
+  test("rotating a key or token keeps the row and replaces the secret", async () => {
+    const id = store.apiKeys()[0]?.id ?? 0;
+    const res = await app.request(`/api/api-keys/${id}/rotate`, { method: "POST", headers: { cookie } });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { id: number; key: string; hint: string; rotated_at: string | null };
+    expect(body.id).toBe(id);
+    expect(body.key.startsWith("kga_")).toBe(true);
+    expect(body.key).not.toBe(apiKey);
+    expect(body.rotated_at).not.toBeNull();
+    expect((await app.request("/api/upstreams", { headers: { authorization: `Bearer ${apiKey}` } })).status).toBe(401);
+    expect((await app.request("/api/upstreams", { headers: { authorization: `Bearer ${body.key}` } })).status).toBe(200);
+    apiKey = body.key;
+
+    const token = store.tokens()[0];
+    if (!token) throw new Error("no token to rotate");
+    const rotated = await app.request(`/api/tokens/${token.id}/rotate`, { method: "POST", headers: { authorization: `Bearer ${apiKey}` } });
+    expect(rotated.status).toBe(200);
+    const t = (await rotated.json()) as { id: number; token: string; scopes: string[]; hash?: string };
+    expect(t.id).toBe(token.id);
+    expect(t.token.startsWith("kg_")).toBe(true);
+    expect(t.scopes).toEqual(["exa"]);
+    expect(t.hash).toBeUndefined();
+    expect(store.tokenByValue(t.token)?.id).toBe(token.id);
+    expect(store.tokenById(token.id)?.hash).not.toBe(token.hash);
+  });
+
   test("a revoked or unknown key is refused", async () => {
     expect((await app.request("/api/upstreams", { headers: { authorization: "Bearer kga_nope" } })).status).toBe(401);
     const id = store.apiKeys()[0]?.id ?? 0;
     expect((await app.request(`/api/api-keys/${id}`, { method: "DELETE", headers: { cookie } })).status).toBe(200);
     expect((await app.request("/api/upstreams", { headers: { authorization: `Bearer ${apiKey}` } })).status).toBe(401);
+    expect((await app.request(`/api/api-keys/${id}/rotate`, { method: "POST", headers: { cookie } })).status).toBe(404);
   });
 });

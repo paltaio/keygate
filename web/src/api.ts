@@ -89,6 +89,7 @@ export interface Token extends TokenInput {
   created_by: number | null;
   created_at: string;
   last_used_at: string | null;
+  rotated_at: string | null;
 }
 
 export interface CreatedToken extends Token {
@@ -103,6 +104,7 @@ export interface ApiKey {
   created_at: string;
   last_used_at: string | null;
   revoked_at: string | null;
+  rotated_at: string | null;
 }
 
 export interface CreatedApiKey extends ApiKey {
@@ -214,12 +216,14 @@ export const api = {
     create: (input: TokenInput) => request<CreatedToken>("POST", "/tokens", input),
     update: (id: number, input: TokenInput) => request<Token>("PATCH", `/tokens/${id}`, input),
     setEnabled: (id: number, enabled: boolean) => request<Token>("PATCH", `/tokens/${id}/enabled`, { enabled }),
+    rotate: (id: number) => request<CreatedToken>("POST", `/tokens/${id}/rotate`),
     revoke: (id: number) => request<{ ok: true }>("DELETE", `/tokens/${id}`),
   },
   requests: (filter: RequestFilter) => request<RequestRow[]>("GET", `/requests${query(filter)}`),
   apiKeys: {
     list: () => request<ApiKey[]>("GET", "/api-keys"),
     create: (name: string) => request<CreatedApiKey>("POST", "/api-keys", { name }),
+    rotate: (id: number) => request<CreatedApiKey>("POST", `/api-keys/${id}/rotate`),
     revoke: (id: number) => request<{ ok: true }>("DELETE", `/api-keys/${id}`),
   },
   users: {

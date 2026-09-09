@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { useLocation } from "wouter";
 import { api, type CreatedToken, type Token } from "../api.ts";
 import { formatDate, formatDateTime, formatRelative, isPast } from "../format.ts";
@@ -34,9 +34,16 @@ function TokenStatus({ t, now }: { t: Token; now: number }) {
 export function TokensPage() {
   const load = useLoad("tokens", api.tokens.list);
   const [revoking, setRevoking] = useState<Token | null>(null);
+  const [rotating, setRotating] = useState<Token | null>(null);
+  const [rotated, setRotated] = useState<CreatedToken | null>(null);
   const revoke = useAction(async (id: number) => {
     await api.tokens.revoke(id);
     setRevoking(null);
+    load.reload();
+  });
+  const rotate = useAction(async (id: number) => {
+    setRotated(await api.tokens.rotate(id));
+    setRotating(null);
     load.reload();
   });
   const toggle = useAction(async (t: Token) => {
@@ -61,6 +68,19 @@ export function TokensPage() {
         <Notice kind="error" className="mb-4">
           {toggle.error}
         </Notice>
+      ) : null}
+      {rotated ? (
+        <div className="mb-6">
+          <CreatedTokenPanel
+            created={rotated}
+            title={`Token "${rotated.name}" rotated`}
+            actions={
+              <Button variant="primary" onClick={() => setRotated(null)}>
+                Done
+              </Button>
+            }
+          />
+        </div>
       ) : null}
       <Panel bleed>
         <table className="tbl">
@@ -99,7 +119,7 @@ export function TokensPage() {
                     </span>
                   </td>
                   <td>
-                    <Mono>{t.hint}</Mono>
+                    <Mono title={t.rotated_at ? `Rotated ${formatDateTime(t.rotated_at)}` : undefined}>{t.hint}</Mono>
                   </td>
                   <td>
                     <Scopes scopes={t.scopes} />
@@ -124,6 +144,9 @@ export function TokensPage() {
                           </LinkButton>
                           <Button size="sm" variant="quiet" onClick={() => void toggle.run(t)} disabled={toggle.busy}>
                             {t.enabled === 1 ? "Disable" : "Enable"}
+                          </Button>
+                          <Button size="sm" variant="quiet" onClick={() => setRotating(t)}>
+                            Rotate
                           </Button>
                           <Button size="sm" variant="quiet" className="text-status-critical hover:text-status-critical" onClick={() => setRevoking(t)}>
                             Revoke
@@ -154,15 +177,31 @@ export function TokensPage() {
       >
         Requests carrying this token are refused from now on. This cannot be undone; create a new token to restore access.
       </ConfirmDialog>
+      <ConfirmDialog
+        open={rotating !== null}
+        title={rotating ? `Rotate "${rotating.name}"?` : ""}
+        confirmLabel="Rotate token"
+        busy={rotate.busy}
+        error={rotate.error}
+        onClose={() => {
+          setRotating(null);
+          rotate.reset();
+        }}
+        onConfirm={() => {
+          if (rotating) void rotate.run(rotating.id);
+        }}
+      >
+        A new value is generated and shown once. The current value is refused from now on; upstreams, origins and expiry stay as they are.
+      </ConfirmDialog>
     </>
   );
 }
 
-function CreatedTokenPanel({ created, onCreateAnother }: { created: CreatedToken; onCreateAnother: () => void }) {
+function CreatedTokenPanel({ created, title, actions }: { created: CreatedToken; title: string; actions: ReactNode }) {
   return (
-    <Panel title={`Token "${created.name}" created`}>
+    <Panel title={title}>
       <Notice kind="info" className="mb-4">
-        Copy the token now. It is shown this once and cannot be retrieved later; create a new token if it is lost.
+        Copy the token now. It is shown this once and cannot be retrieved later; rotate the token if it is lost.
       </Notice>
       <div className="flex items-center gap-2">
         <InkBlock className="min-w-0 flex-1 select-all">{created.token}</InkBlock>
@@ -172,12 +211,7 @@ function CreatedTokenPanel({ created, onCreateAnother }: { created: CreatedToken
         Consumers send it as <Mono>Authorization: Bearer {"<token>"}</Mono>, in the <Mono>X-Keygate-Token</Mono> header, as <Mono>?keygate_token=</Mono>, or in place
         of any placement value.
       </p>
-      <div className="mt-5 flex gap-2">
-        <LinkButton href="/tokens" variant="primary">
-          Done
-        </LinkButton>
-        <Button onClick={onCreateAnother}>Create another</Button>
-      </div>
+      <div className="mt-5 flex gap-2">{actions}</div>
     </Panel>
   );
 }
@@ -188,7 +222,18 @@ export function NewTokenPage() {
     return (
       <>
         <PageHeader title="New token" />
-        <CreatedTokenPanel created={created} onCreateAnother={() => setCreated(null)} />
+        <CreatedTokenPanel
+          created={created}
+          title={`Token "${created.name}" created`}
+          actions={
+            <>
+              <LinkButton href="/tokens" variant="primary">
+                Done
+              </LinkButton>
+              <Button onClick={() => setCreated(null)}>Create another</Button>
+            </>
+          }
+        />
       </>
     );
   }

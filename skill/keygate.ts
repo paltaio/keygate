@@ -407,6 +407,11 @@ async function run(): Promise<void> {
         emit({ ok: true }, () => `token ${id} ${sub}d`);
         return;
       }
+      if (sub === "rotate") {
+        const rotated = await api<Token & { token: string }>(`/tokens/${id}/rotate`, { method: "POST" });
+        emit(rotated, () => `token ${rotated.id} "${rotated.name}" rotated; the old value is refused from now on\n${rotated.token}\nShown once. Store it now.`);
+        return;
+      }
       if (sub === "revoke") {
         await api(`/tokens/${id}`, { method: "DELETE" });
         emit({ ok: true }, () => `token ${id} revoked`);
@@ -470,7 +475,7 @@ credential activate|enable|disable|revoke <id>
 tokens                                        List consumer tokens
 token create --name N --scope SLUG... [--origin O...] [--expires ISO]
 token update <id> [--name N] [--scope SLUG...] [--origin O...|--origin none] [--expires ISO|none]
-token enable|disable|revoke <id>
+token enable|disable|rotate|revoke <id>
 requests [--upstream SLUG] [--token ID] [--status ok|client_error|upstream_error|proxy_error] [--limit N] [--before ID]
 
 --placement is type:name=template, where type is header, query, cookie, json or form and the

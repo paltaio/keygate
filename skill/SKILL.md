@@ -61,9 +61,10 @@ used.
 
 Tokens: `tokens`, `token create --name N --scope slug [--scope slug]
 [--origin https://app.example] [--expires 2027-01-01T00:00:00Z]`, `token
-update <id> ...`, `token enable|disable <id>`, `token revoke <id>`. The
-plaintext appears once in the create output; hand it to the client and do not
-keep it elsewhere. `--scope '*'` covers every upstream. Origins matter only
+update <id> ...`, `token enable|disable <id>`, `token rotate <id>`, `token
+revoke <id>`. The plaintext appears once in the create or rotate output; hand
+it to the client and do not keep it elsewhere. Rotate keeps the id, scopes,
+origins and expiry and refuses the old value from then on. `--scope '*'` covers every upstream. Origins matter only
 for browser callers; a token without origins refuses requests that carry an
 Origin header.
 
