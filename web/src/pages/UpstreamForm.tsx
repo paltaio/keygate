@@ -101,10 +101,10 @@ export default function UpstreamForm({ initial, mode, submitLabel, onSubmit }: P
           <Input id="upstream-name" value={form.name} onChange={(e) => set("name", e.target.value)} aria-invalid={errors.name ? true : undefined} placeholder="OpenAI" />
         </Field>
         <Field label="Slug" htmlFor="upstream-slug" hint="Consumers address the upstream by this slug in the path or as a subdomain." error={errors.slug}>
-          <Input id="upstream-slug" className="font-mono" value={form.slug} onChange={(e) => set("slug", e.target.value)} aria-invalid={errors.slug ? true : undefined} placeholder="openai" spellCheck={false} />
+          <Input id="upstream-slug" mono value={form.slug} onChange={(e) => set("slug", e.target.value)} aria-invalid={errors.slug ? true : undefined} placeholder="openai" spellCheck={false} />
         </Field>
         <Field label="Base URL" htmlFor="upstream-base_url" hint="The consumer's path is appended to this URL." error={errors.base_url}>
-          <Input id="upstream-base_url" className="font-mono" value={form.base_url} onChange={(e) => set("base_url", e.target.value)} aria-invalid={errors.base_url ? true : undefined} placeholder="https://api.openai.com/v1" spellCheck={false} />
+          <Input id="upstream-base_url" mono value={form.base_url} onChange={(e) => set("base_url", e.target.value)} aria-invalid={errors.base_url ? true : undefined} placeholder="https://api.openai.com/v1" spellCheck={false} />
         </Field>
         <Field label="Strategy" htmlFor="upstream-strategy" hint={STRATEGY_HELP[form.strategy]}>
           <Select id="upstream-strategy" value={form.strategy} onChange={(e) => set("strategy", e.target.value as Strategy)}>

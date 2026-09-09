@@ -135,7 +135,7 @@ export default function TokenForm({ initial, submitLabel, onSubmit }: Props) {
             <Textarea
               id="token-origins"
               aria-label="Allowed origins, one per line"
-              className="font-mono"
+              mono
               rows={3}
               placeholder={"https://app.example.com\nhttp://localhost:5173"}
               value={form.originText}

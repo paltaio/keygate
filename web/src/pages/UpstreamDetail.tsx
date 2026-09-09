@@ -6,7 +6,7 @@ import { useAction, useLoad } from "../hooks.ts";
 import { NO_PLACEMENT_ERRORS, cleanPlacements, firstPlacementErrorId, validatePlacements, type PlacementErrors } from "../placement-rules.ts";
 import { PlacementsEditor } from "../placements-editor.tsx";
 import { PlacementPreview, UrlForms } from "../placements.tsx";
-import { Button, Checkbox, ConfirmDialog, Field, Input, LoadError, Mono, Notice, PageHeader, Panel, Pill, TableMessage, TextLink } from "../ui.tsx";
+import { Button, Checkbox, ConfirmDialog, Field, Input, LoadError, Mono, Notice, PageHeader, Panel, Pill, SecretInput, TableMessage, TextLink } from "../ui.tsx";
 import UpstreamForm from "./UpstreamForm.tsx";
 
 function PlacementsPanel({ upstream, onSaved }: { upstream: Detail; onSaved: () => void }) {
@@ -102,19 +102,6 @@ function StatusCell({ k, upstream, now }: { k: ProviderKey; upstream: Detail; no
         </>
       ) : null}
     </span>
-  );
-}
-
-/** Password input with a show toggle; used for every credential value. */
-function SecretInput({ id, value, onChange, invalid, autoFocus }: { id: string; value: string; onChange: (v: string) => void; invalid?: boolean | undefined; autoFocus?: boolean | undefined }) {
-  const [shown, setShown] = useState(false);
-  return (
-    <div className="flex gap-2">
-      <Input id={id} type={shown ? "text" : "password"} className="font-mono" autoComplete="off" spellCheck={false} value={value} onChange={(e) => onChange(e.target.value)} aria-invalid={invalid ? true : undefined} autoFocus={autoFocus} />
-      <Button onClick={() => setShown((s) => !s)} aria-pressed={shown}>
-        {shown ? "Hide" : "Show"}
-      </Button>
-    </div>
   );
 }
 

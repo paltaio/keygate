@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type ButtonHTMLAttributes, type InputHTMLAttributes, type ReactNode, type SelectHTMLAttributes, type TextareaHTMLAttributes } from "react";
+import { Check, Copy, Eye, EyeClosed, NavArrowDown } from "iconoir-react";
 import { Link } from "wouter";
 
 function cx(...parts: (string | false | null | undefined)[]): string {
@@ -8,17 +9,18 @@ function cx(...parts: (string | false | null | undefined)[]): string {
 type Variant = "primary" | "secondary" | "danger" | "quiet";
 type Size = "md" | "sm";
 
-const BUTTON_BASE =
-  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-ctl font-medium transition-colors duration-[120ms] ease-out disabled:cursor-not-allowed disabled:opacity-60";
+/* Shared by buttons and form controls: one height per size, ring-on-focus, muted disabled state. */
+const FOCUS = "outline-none focus-visible:ring-[3px] focus-visible:ring-focus-ring";
+const BUTTON_BASE = `inline-flex shrink-0 items-center justify-center gap-2 whitespace-nowrap rounded-ctl border font-medium transition-[background-color,border-color,box-shadow] duration-[120ms] ease-out disabled:cursor-not-allowed disabled:opacity-60 aria-busy:cursor-progress [&_svg]:-mx-0.5 [&_svg]:shrink-0 ${FOCUS}`;
 const BUTTON_VARIANT: Record<Variant, string> = {
-  primary: "bg-accent-primary text-content-on-accent hover:bg-accent-hover",
-  secondary: "border border-border-strong bg-surface-raised text-content-default hover:bg-surface-sunken",
-  danger: "bg-status-critical text-content-on-accent hover:opacity-90",
-  quiet: "text-content-muted hover:bg-surface-sunken hover:text-content-default",
+  primary: "border-accent-primary bg-accent-primary text-content-on-accent hover:border-accent-hover hover:bg-accent-hover",
+  secondary: "border-border-strong bg-surface-raised text-content-default hover:bg-surface-sunken",
+  danger: "border-status-critical bg-status-critical text-content-on-accent hover:opacity-90",
+  quiet: "border-transparent text-content-muted hover:bg-surface-sunken hover:text-content-default",
 };
 const BUTTON_SIZE: Record<Size, string> = {
-  md: "h-9 px-3.5 text-sm",
-  sm: "h-7 px-2.5 text-xs",
+  md: "h-9 px-3 text-sm",
+  sm: "h-7 gap-1.5 px-2 text-xs",
 };
 
 interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
@@ -29,13 +31,8 @@ interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
 
 export function Button({ variant = "secondary", size = "md", busy = false, className, disabled, type = "button", children, ...rest }: ButtonProps) {
   return (
-    <button
-      type={type}
-      className={cx(BUTTON_BASE, BUTTON_SIZE[size], BUTTON_VARIANT[variant], className)}
-      disabled={disabled || busy}
-      aria-busy={busy || undefined}
-      {...rest}
-    >
+    <button type={type} className={cx(BUTTON_BASE, BUTTON_SIZE[size], BUTTON_VARIANT[variant], className)} disabled={disabled || busy} aria-busy={busy || undefined} {...rest}>
+      {busy ? <span aria-hidden className="size-3.5 animate-spin rounded-full border-2 border-current border-r-transparent" /> : null}
       {children}
     </button>
   );
@@ -59,26 +56,85 @@ export function LinkButton({ href, variant = "secondary", size = "md", className
 
 export function TextLink({ href, children, className }: { href: string; children: ReactNode; className?: string | undefined }) {
   return (
-    <Link href={href} className={cx("font-medium text-content-default underline decoration-border-strong underline-offset-2 hover:decoration-accent-primary", className)}>
+    <Link href={href} className={cx("rounded-ctl font-medium text-content-default underline decoration-border-strong underline-offset-2 hover:decoration-accent-primary", FOCUS, className)}>
       {children}
     </Link>
   );
 }
 
-const CONTROL =
-  "w-full rounded-ctl border border-border-strong bg-surface-raised px-3 text-[15px] text-content-default placeholder:text-content-faint aria-invalid:border-status-critical disabled:opacity-60";
+/* Text controls share border, background, focus and invalid treatment; height comes from the size. */
+const CONTROL = `w-full min-w-0 rounded-ctl border border-border-strong bg-surface-raised text-content-default transition-[border-color,box-shadow] duration-[120ms] placeholder:text-content-faint hover:border-content-muted focus-visible:border-accent-primary aria-invalid:border-status-critical aria-invalid:focus-visible:ring-critical-ring disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:border-border-strong ${FOCUS}`;
+const CONTROL_SIZE: Record<Size, string> = {
+  md: "h-9 px-3 text-[15px]",
+  sm: "h-7 px-2 text-xs",
+};
 
-export function Input({ className, ...rest }: InputHTMLAttributes<HTMLInputElement>) {
-  return <input className={cx(CONTROL, "h-9", className)} {...rest} />;
+interface ControlProps {
+  size?: Size | undefined;
+  /** Monospace text for slugs, URLs, templates and secret values. */
+  mono?: boolean | undefined;
 }
 
-export function Select({ className, ...rest }: SelectHTMLAttributes<HTMLSelectElement>) {
-  return <select className={cx(CONTROL, "h-9", className)} {...rest} />;
+export function Input({ size = "md", mono = false, className, ...rest }: Omit<InputHTMLAttributes<HTMLInputElement>, "size"> & ControlProps) {
+  return <input className={cx(CONTROL, CONTROL_SIZE[size], mono && "font-mono", className)} {...rest} />;
 }
 
-export function Textarea({ className, ...rest }: TextareaHTMLAttributes<HTMLTextAreaElement>) {
-  return <textarea className={cx(CONTROL, "py-2 leading-normal", className)} {...rest} />;
+/** Native select with the frame's own chevron; the right padding clears it. */
+export function Select({ size = "md", className, children, ...rest }: Omit<SelectHTMLAttributes<HTMLSelectElement>, "size"> & ControlProps) {
+  return (
+    <span className={cx("relative inline-flex w-full min-w-0", className)}>
+      <select className={cx(CONTROL, CONTROL_SIZE[size], "peer appearance-none", size === "md" ? "pe-9" : "pe-7")} {...rest}>
+        {children}
+      </select>
+      <NavArrowDown aria-hidden className={cx("pointer-events-none absolute top-1/2 -translate-y-1/2 text-content-muted peer-disabled:opacity-60", size === "md" ? "right-2.5" : "right-1.5")} />
+    </span>
+  );
 }
+
+export function Textarea({ mono = false, className, ...rest }: TextareaHTMLAttributes<HTMLTextAreaElement> & Pick<ControlProps, "mono">) {
+  return <textarea className={cx(CONTROL, "min-h-20 px-3 py-2 text-[15px] leading-normal", mono && "font-mono", className)} {...rest} />;
+}
+
+interface SecretInputProps {
+  id: string;
+  value: string;
+  onChange: (value: string) => void;
+  invalid?: boolean | undefined;
+  autoFocus?: boolean | undefined;
+}
+
+/** Password-style input with a show/hide toggle inside the frame. */
+export function SecretInput({ id, value, onChange, invalid, autoFocus }: SecretInputProps) {
+  const [shown, setShown] = useState(false);
+  return (
+    <span className="relative inline-flex w-full min-w-0">
+      <Input
+        id={id}
+        type={shown ? "text" : "password"}
+        mono
+        className="pe-10"
+        autoComplete="off"
+        spellCheck={false}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        aria-invalid={invalid ? true : undefined}
+        autoFocus={autoFocus}
+      />
+      <button
+        type="button"
+        className={cx("absolute top-1/2 right-1 inline-flex size-7 -translate-y-1/2 items-center justify-center rounded-ctl text-content-muted hover:bg-surface-sunken hover:text-content-default", FOCUS)}
+        onClick={() => setShown((s) => !s)}
+        aria-pressed={shown}
+        aria-label={shown ? "Hide value" : "Show value"}
+        title={shown ? "Hide value" : "Show value"}
+      >
+        {shown ? <EyeClosed aria-hidden /> : <Eye aria-hidden />}
+      </button>
+    </span>
+  );
+}
+
+const TICK = `size-4 shrink-0 rounded-ctl accent-accent-primary ${FOCUS} disabled:cursor-not-allowed disabled:opacity-60`;
 
 interface CheckboxProps extends Omit<InputHTMLAttributes<HTMLInputElement>, "type"> {
   label: ReactNode;
@@ -86,8 +142,8 @@ interface CheckboxProps extends Omit<InputHTMLAttributes<HTMLInputElement>, "typ
 
 export function Checkbox({ label, className, ...rest }: CheckboxProps) {
   return (
-    <label className={cx("inline-flex items-center gap-2 text-sm", className)}>
-      <input type="checkbox" className="size-4 accent-accent-primary" {...rest} />
+    <label className={cx("inline-flex items-center gap-2 text-sm has-disabled:opacity-60", className)}>
+      <input type="checkbox" className={TICK} {...rest} />
       <span>{label}</span>
     </label>
   );
@@ -99,8 +155,8 @@ interface RadioProps extends Omit<InputHTMLAttributes<HTMLInputElement>, "type">
 
 export function Radio({ label, className, ...rest }: RadioProps) {
   return (
-    <label className={cx("inline-flex items-center gap-2 text-sm", className)}>
-      <input type="radio" className="size-4 accent-accent-primary" {...rest} />
+    <label className={cx("inline-flex items-center gap-2 text-sm has-disabled:opacity-60", className)}>
+      <input type="radio" className={cx(TICK, "rounded-full")} {...rest} />
       <span>{label}</span>
     </label>
   );
@@ -248,6 +304,7 @@ export function CopyButton({ value, label = "Copy", size = "sm" }: { value: stri
   };
   return (
     <Button size={size} onClick={copy} aria-live="polite">
+      {state === "copied" ? <Check aria-hidden /> : <Copy aria-hidden />}
       {state === "copied" ? "Copied" : state === "failed" ? "Copy failed, select the text" : label}
     </Button>
   );

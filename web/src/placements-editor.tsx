@@ -1,3 +1,4 @@
+import { Plus, Xmark } from "iconoir-react";
 import { PLACEMENT_TYPES, type Placement, type PlacementType } from "./api.ts";
 import { PLACEMENT_NAME_HINT, PLACEMENT_TYPE_LABEL, placeholderNames } from "./format.ts";
 import { MAX_PLACEMENTS, PLACEMENT_PRESETS, placementFieldId, type PlacementErrors } from "./placement-rules.ts";
@@ -15,7 +16,7 @@ export function PlacementsEditor({ placements, errors, onChange }: Props) {
   const names = placeholderNames(placements);
 
   return (
-    <div className="flex flex-col gap-3">
+    <div className="@container flex flex-col gap-3">
       <p className="text-sm text-content-muted">
         Where credential values go on each request. Write <Mono>{"{{name}}"}</Mono> where a value belongs; text outside the braces is sent as-is.
       </p>
@@ -32,7 +33,7 @@ export function PlacementsEditor({ placements, errors, onChange }: Props) {
           const rowError = errors.rows[i];
           return (
             <div key={i} className="flex flex-col gap-1.5">
-              <div className="grid gap-2 md:grid-cols-[9rem_minmax(0,1fr)_minmax(0,1.4fr)_auto] md:items-center">
+              <div className="grid grid-cols-[8.5rem_minmax(0,1fr)] items-center gap-2 @[40rem]:grid-cols-[8.5rem_minmax(0,1fr)_minmax(0,2fr)_auto]">
                 <Select aria-label={`Placement ${i + 1} location`} value={p.type} onChange={(e) => setRow(i, { type: e.target.value as PlacementType })}>
                   {PLACEMENT_TYPES.map((t) => (
                     <option key={t} value={t}>
@@ -43,7 +44,7 @@ export function PlacementsEditor({ placements, errors, onChange }: Props) {
                 <Input
                   id={placementFieldId(i, "name")}
                   aria-label={`Placement ${i + 1} name`}
-                  className="font-mono"
+                  mono
                   placeholder={PLACEMENT_NAME_HINT[p.type]}
                   value={p.name}
                   onChange={(e) => setRow(i, { name: e.target.value })}
@@ -53,14 +54,16 @@ export function PlacementsEditor({ placements, errors, onChange }: Props) {
                 <Input
                   id={placementFieldId(i, "value")}
                   aria-label={`Placement ${i + 1} value template`}
-                  className="font-mono"
+                  mono
+                  className="@max-[40rem]:col-span-2"
                   placeholder="Bearer {{token}}"
                   value={p.value}
                   onChange={(e) => setRow(i, { value: e.target.value })}
                   aria-invalid={rowError ? true : undefined}
                   spellCheck={false}
                 />
-                <Button variant="quiet" onClick={() => onChange(placements.filter((_, j) => j !== i))} disabled={placements.length <= 1} aria-label={`Remove placement ${i + 1}`}>
+                <Button variant="quiet" className="@max-[40rem]:col-span-2 @max-[40rem]:justify-self-start" onClick={() => onChange(placements.filter((_, j) => j !== i))} disabled={placements.length <= 1} aria-label={`Remove placement ${i + 1}`}>
+                  <Xmark aria-hidden />
                   Remove
                 </Button>
               </div>
@@ -80,6 +83,7 @@ export function PlacementsEditor({ placements, errors, onChange }: Props) {
       ) : null}
       <div className="flex flex-wrap items-center gap-3">
         <Button id="upstream-add-placement" size="sm" onClick={() => onChange([...placements, { type: "header", name: "", value: "" }])} disabled={placements.length >= MAX_PLACEMENTS}>
+          <Plus aria-hidden />
           Add placement
         </Button>
         {placements.length >= MAX_PLACEMENTS ? <span className="text-sm text-content-muted">Up to {MAX_PLACEMENTS} placements.</span> : null}
