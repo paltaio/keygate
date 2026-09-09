@@ -64,7 +64,7 @@ function CreateForm({ onCreated }: { onCreated: (key: CreatedApiKey) => void }) 
               if (error) setError(null);
             }}
             aria-invalid={error ? true : undefined}
-            placeholder="claude on my laptop"
+            placeholder="agent on my laptop"
           />
         </Field>
       </div>
@@ -164,7 +164,7 @@ export default function ApiKeys() {
             </tbody>
           </table>
         </Panel>
-        <Panel title="Use it from a terminal or an agent" description="Installs the keygate skill and CLI for Claude Code; the CLI reads the key from an env file.">
+        <Panel title="Use it from a terminal or an agent" description="Installs the keygate skill and CLI for Claude Code or any agent that reads a SKILL.md; the CLI takes the key from an env file.">
           <div className="flex flex-col gap-5">
             <div>
               <p className="mb-2 text-sm">Install the skill and CLI:</p>

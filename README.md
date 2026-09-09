@@ -109,3 +109,7 @@ Everything the dashboard does goes through `/api` with a session cookie from
 `POST /api/auth/login`. Provider secrets are write-only: responses carry a
 short hint, never the value. Consumer tokens are returned once, in the create
 response.
+
+## License
+
+MIT.
