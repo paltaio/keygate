@@ -28,6 +28,8 @@
   --color-status-critical-soft: oklch(95% 0.03 28);
   --color-ink-edge: transparent;
   --color-backdrop: oklch(25% 0.015 80 / 0.45);
+  --color-focus-ring: color-mix(in oklab, var(--color-accent-primary) 30%, transparent);
+  --color-critical-ring: color-mix(in oklab, var(--color-status-critical) 24%, transparent);
 
   --radius-*: initial;
   --radius-ctl: 4px;
@@ -42,6 +44,7 @@
 
 :root {
   color-scheme: light;
+  --sidebar-width: 13.5rem;
 
   --dark-surface-base: oklch(17% 0.008 80);
   --dark-surface-raised: oklch(21.5% 0.009 80);
@@ -119,6 +122,17 @@
     --color-ink-edge: var(--dark-ink-edge);
     --color-backdrop: var(--dark-backdrop);
     --color-shadow: var(--dark-shadow);
+  }
+}
+
+:root[data-sidebar="collapsed"] {
+  --sidebar-width: 3.5rem;
+}
+
+@media (min-width: 48rem) {
+  .sidebar {
+    width: var(--sidebar-width);
+    transition: width 160ms var(--ease-out);
   }
 }
 
