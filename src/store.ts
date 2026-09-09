@@ -68,6 +68,17 @@ export interface Token {
   last_used_at: string | null;
 }
 
+export interface ApiKey {
+  id: number;
+  name: string;
+  hint: string;
+  hash: string;
+  created_by: number | null;
+  created_at: string;
+  last_used_at: string | null;
+  revoked_at: string | null;
+}
+
 export interface RequestLog {
   id: number;
   ts: string;
@@ -137,6 +148,16 @@ CREATE TABLE IF NOT EXISTS tokens (
   created_at TEXT NOT NULL,
   last_used_at TEXT
 );
+CREATE TABLE IF NOT EXISTS api_keys (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL,
+  hint TEXT NOT NULL,
+  hash TEXT NOT NULL UNIQUE,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL,
+  last_used_at TEXT,
+  revoked_at TEXT
+);
 CREATE TABLE IF NOT EXISTS requests (
   id INTEGER PRIMARY KEY,
   ts TEXT NOT NULL,
@@ -163,7 +184,7 @@ const ADDED_COLUMNS: Array<[table: string, column: string, ddl: string]> = [
   ["tokens", "enabled", "INTEGER NOT NULL DEFAULT 1"],
 ];
 
-export const RESERVED_SLUGS = new Set(["admin", "api", "health", "assets"]);
+export const RESERVED_SLUGS = new Set(["admin", "api", "health", "assets", "docs"]);
 
 const now = (): string => new Date().toISOString();
 
@@ -171,16 +192,19 @@ export function sha256(value: string): string {
   return new Bun.CryptoHasher("sha256").update(value).digest("hex");
 }
 
+/** Consumer tokens, accepted by the proxy. */
 export const TOKEN_PREFIX = "kg_";
+/** Admin API keys, accepted by /api. */
+export const API_KEY_PREFIX = "kga_";
 
-function randomToken(): string {
+function randomToken(prefix: string = TOKEN_PREFIX): string {
   const bytes = new Uint8Array(32);
   crypto.getRandomValues(bytes);
-  return TOKEN_PREFIX + Buffer.from(bytes).toString("base64url");
+  return prefix + Buffer.from(bytes).toString("base64url");
 }
 
-function tokenHint(token: string): string {
-  return `${token.slice(0, TOKEN_PREFIX.length + 4)}...${token.slice(-4)}`;
+function tokenHint(token: string, prefix: string = TOKEN_PREFIX): string {
+  return `${token.slice(0, prefix.length + 4)}...${token.slice(-4)}`;
 }
 
 export function secretHint(secret: string): string {
@@ -540,6 +564,38 @@ export class Store {
       const origins = parseList(row.origins);
       return (scopes.includes("*") || scopes.includes(slug)) && (origins.includes("*") || origins.includes(origin));
     });
+  }
+
+  // Admin API keys
+
+  apiKeys(): ApiKey[] {
+    return this.db.query<ApiKey, []>("SELECT * FROM api_keys ORDER BY id DESC").all();
+  }
+
+  apiKeyByValue(value: string): ApiKey | null {
+    return this.db.query<ApiKey, [string]>("SELECT * FROM api_keys WHERE hash = ?").get(sha256(value));
+  }
+
+  createApiKey(name: string, createdBy: number): { id: number; key: string } {
+    const key = randomToken(API_KEY_PREFIX);
+    const result = this.db
+      .query<never, [string, string, string, number, string]>(
+        "INSERT INTO api_keys (name, hint, hash, created_by, created_at) VALUES (?, ?, ?, ?, ?)",
+      )
+      .run(name, tokenHint(key, API_KEY_PREFIX), sha256(key), createdBy, now());
+    return { id: Number(result.lastInsertRowid), key };
+  }
+
+  revokeApiKey(id: number): boolean {
+    return (
+      this.db
+        .query<never, [string, number]>("UPDATE api_keys SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL")
+        .run(now(), id).changes > 0
+    );
+  }
+
+  touchApiKey(id: number): void {
+    this.db.query<never, [string, number]>("UPDATE api_keys SET last_used_at = ? WHERE id = ?").run(now(), id);
   }
 
   // Request log

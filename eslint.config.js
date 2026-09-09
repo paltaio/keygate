@@ -8,7 +8,7 @@ import { defineConfig, globalIgnores } from "eslint/config";
 export default defineConfig([
   globalIgnores(["dist", "node_modules", "data"]),
   {
-    files: ["src/**/*.ts"],
+    files: ["src/**/*.ts", "skill/**/*.ts"],
     extends: [js.configs.recommended, tseslint.configs.recommended],
     languageOptions: { ecmaVersion: 2024, globals: { ...globals.node, Bun: "readonly" } },
   },

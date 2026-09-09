@@ -18,5 +18,5 @@
     "noUnusedParameters": true,
     "noUncheckedSideEffectImports": true
   },
-  "include": ["src"]
+  "include": ["src", "skill"]
 }

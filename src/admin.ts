@@ -1,7 +1,7 @@
 import { Hono, type Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
-import { allowLoginAttempt, clearLoginAttempts, clientIp, endSession, requireUser, startSession, type AuthVariables } from "./auth.ts";
+import { allowLoginAttempt, clearLoginAttempts, clientIp, endSession, requireSession, requireUser, startSession, type AuthVariables } from "./auth.ts";
 import type { Env } from "./env.ts";
 import { PLACEMENT_TYPES, RESERVED_SLUGS, STRATEGIES, missingSecrets, parseList, parsePlacements, parseSecrets, placeholderNames, secretHint, type Placement, type ProviderKey, type Store, type Token, type Upstream } from "./store.ts";
 
@@ -42,6 +42,7 @@ const schemas = {
     notes: z.string().max(2000).default(""),
   }),
   enabled: z.object({ enabled: z.boolean() }),
+  apiKey: z.object({ name: z.string().min(1).max(100) }),
   key: z.object({
     label: z.string().min(1).max(100),
     secrets: z.record(secretName, z.string().min(1).max(4000)).default({}),
@@ -157,7 +158,30 @@ export function adminRoutes(store: Store, env: Env): Hono<{ Variables: AuthVaria
 
   app.get("/auth/me", (c) => {
     const user = c.get("user");
-    return c.json({ id: user.id, email: user.email, name: user.name });
+    const apiKey = c.get("apiKey");
+    return c.json({ id: user.id, email: user.email, name: user.name, ...(apiKey ? { api_key: { id: apiKey.id, name: apiKey.name } } : {}) });
+  });
+
+  app.use("/users/*", requireSession());
+  app.use("/users", requireSession());
+  app.use("/api-keys/*", requireSession());
+  app.use("/api-keys", requireSession());
+
+  app.get("/api-keys", (c) => c.json(store.apiKeys().map(({ hash, ...rest }) => (void hash, rest))));
+
+  app.post("/api-keys", async (c) => {
+    const input = await parseBody(c, schemas.apiKey);
+    const { id, key } = store.createApiKey(input.name, c.get("user").id);
+    const created = store.apiKeys().find((k) => k.id === id);
+    if (!created) fail(404, "not_found", "API key vanished after creation");
+    const { hash, ...rest } = created;
+    void hash;
+    return c.json({ ...rest, key }, 201);
+  });
+
+  app.delete("/api-keys/:id", (c) => {
+    if (!store.revokeApiKey(idParam(c))) fail(404, "not_found", "No such API key, or it is already revoked");
+    return c.json({ ok: true });
   });
 
   app.get("/overview", (c) => {

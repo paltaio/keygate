@@ -23,6 +23,13 @@ app.use("*", async (c, next) => {
 
 app.get("/", (c) => c.redirect("/admin"));
 app.get("/health", (c) => c.json({ ok: true }));
+
+const skillDir = "./skill";
+const skillTemplate = await Bun.file(join(skillDir, "SKILL.md")).text();
+const cliSource = await Bun.file(join(skillDir, "keygate.ts")).text();
+const publicHost = (c: { req: { header: (name: string) => string | undefined } }): string => env.KEYGATE_HOST ?? c.req.header("host") ?? "localhost";
+app.get("/docs/skill.md", (c) => c.text(skillTemplate.replaceAll("{{host}}", publicHost(c)), 200, { "content-type": "text/markdown; charset=utf-8" }));
+app.get("/docs/keygate.ts", (c) => c.text(cliSource, 200, { "content-type": "text/typescript; charset=utf-8" }));
 app.route("/api", adminRoutes(store, env));
 
 const webRoot = "./dist/web";

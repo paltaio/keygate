@@ -11,6 +11,7 @@ ENV NODE_ENV=production KEYGATE_DATA_DIR=/data PORT=3000
 COPY package.json bun.lock ./
 RUN bun install --frozen-lockfile --production
 COPY src ./src
+COPY skill ./skill
 COPY --from=build /app/dist ./dist
 VOLUME /data
 EXPOSE 3000

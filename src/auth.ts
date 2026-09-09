@@ -2,10 +2,12 @@ import type { Context, MiddlewareHandler } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import type { Env } from "./env.ts";
 import { SESSION_COOKIE } from "./proxy.ts";
-import type { Store, User } from "./store.ts";
+import type { ApiKey, Store, User } from "./store.ts";
 
 export interface AuthVariables {
   user: User;
+  /** Set when the request authenticated with an admin API key instead of a session. */
+  apiKey?: ApiKey;
 }
 
 export type AuthContext = Context<{ Variables: AuthVariables }>;
@@ -55,12 +57,32 @@ export function endSession(c: Context, store: Store): void {
   deleteCookie(c, SESSION_COOKIE, { path: "/" });
 }
 
+/** Accepts a session cookie or an admin API key as a bearer token. API-key requests act as the key's creator. */
 export function requireUser(store: Store): MiddlewareHandler<{ Variables: AuthVariables }> {
   return async (c, next) => {
+    const auth = c.req.header("authorization");
+    if (auth && /^bearer\s+/i.test(auth)) {
+      const key = store.apiKeyByValue(auth.replace(/^bearer\s+/i, "").trim());
+      const user = key && !key.revoked_at && key.created_by ? store.userById(key.created_by) : null;
+      if (!key || !user) return c.json({ error: "invalid_api_key", message: "This API key is unknown or revoked" }, 401);
+      store.touchApiKey(key.id);
+      c.set("user", user);
+      c.set("apiKey", key);
+      await next();
+      return;
+    }
     const id = getCookie(c, SESSION_COOKIE);
     const user = id ? store.sessionUser(id) : null;
     if (!user) return c.json({ error: "unauthenticated", message: "Sign in first" }, 401);
     c.set("user", user);
+    await next();
+  };
+}
+
+/** Routes that only a signed-in person may use: managing users and API keys. */
+export function requireSession(): MiddlewareHandler<{ Variables: AuthVariables }> {
+  return async (c, next) => {
+    if (c.get("apiKey")) return c.json({ error: "session_required", message: "Sign in to the dashboard for this" }, 403);
     await next();
   };
 }

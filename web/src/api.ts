@@ -95,6 +95,20 @@ export interface CreatedToken extends Token {
   token: string;
 }
 
+export interface ApiKey {
+  id: number;
+  name: string;
+  hint: string;
+  created_by: number | null;
+  created_at: string;
+  last_used_at: string | null;
+  revoked_at: string | null;
+}
+
+export interface CreatedApiKey extends ApiKey {
+  key: string;
+}
+
 export interface RequestRow {
   id: number;
   ts: string;
@@ -203,6 +217,11 @@ export const api = {
     revoke: (id: number) => request<{ ok: true }>("DELETE", `/tokens/${id}`),
   },
   requests: (filter: RequestFilter) => request<RequestRow[]>("GET", `/requests${query(filter)}`),
+  apiKeys: {
+    list: () => request<ApiKey[]>("GET", "/api-keys"),
+    create: (name: string) => request<CreatedApiKey>("POST", "/api-keys", { name }),
+    revoke: (id: number) => request<{ ok: true }>("DELETE", `/api-keys/${id}`),
+  },
   users: {
     list: () => request<User[]>("GET", "/users"),
     create: (input: { email: string; name: string; password: string }) => request<User>("POST", "/users", input),
