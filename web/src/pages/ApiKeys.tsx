@@ -4,8 +4,29 @@ import { formatDate, formatDateTime, formatRelative } from "../format.ts";
 import { useAction, useLoad } from "../hooks.ts";
 import { Button, ConfirmDialog, CopyButton, Field, InkBlock, Input, LoadError, Mono, Notice, PageHeader, Panel, Pill, TableMessage } from "../ui.tsx";
 
-function installLines(origin: string): string {
-  return ["mkdir -p ~/.claude/skills/keygate", `curl -fsSL ${origin}/docs/skill.md -o ~/.claude/skills/keygate/SKILL.md`, `curl -fsSL ${origin}/docs/keygate.ts -o ~/.claude/skills/keygate/keygate.ts`].join("\n");
+/** Where each agent reads user-level skills from. */
+const AGENTS = [
+  { id: "claude", label: "Claude Code", dir: "~/.claude/skills/keygate" },
+  { id: "codex", label: "Codex", dir: "~/.agents/skills/keygate" },
+  { id: "opencode", label: "OpenCode", dir: "~/.config/opencode/skills/keygate" },
+  { id: "grok", label: "Grok Build", dir: "~/.grok/skills/keygate" },
+] as const;
+type AgentId = (typeof AGENTS)[number]["id"];
+
+function installLines(origin: string, dir: string): string {
+  return [`mkdir -p ${dir}`, `curl -fsSL ${origin}/docs/skill.md -o ${dir}/SKILL.md`, `curl -fsSL ${origin}/docs/keygate.ts -o ${dir}/keygate.ts`].join("\n");
+}
+
+function AgentPicker({ value, onChange }: { value: AgentId; onChange: (id: AgentId) => void }) {
+  return (
+    <div role="group" aria-label="Agent" className="inline-flex rounded-ctl border border-border-strong bg-surface-raised p-0.5">
+      {AGENTS.map((a) => (
+        <Button key={a.id} size="sm" variant="quiet" aria-pressed={a.id === value} className="aria-pressed:bg-surface-sunken aria-pressed:text-content-default" onClick={() => onChange(a.id)}>
+          {a.label}
+        </Button>
+      ))}
+    </div>
+  );
 }
 
 function envLines(origin: string, key: string | null): string {
@@ -97,8 +118,10 @@ export default function ApiKeys() {
     setRotating(null);
     load.reload();
   });
+  const [agent, setAgent] = useState<AgentId>("claude");
   const data = load.data;
   const origin = window.location.origin;
+  const install = installLines(origin, AGENTS.find((a) => a.id === agent)?.dir ?? AGENTS[0].dir);
 
   return (
     <>
@@ -180,13 +203,16 @@ export default function ApiKeys() {
             </tbody>
           </table>
         </Panel>
-        <Panel title="Use it from a terminal or an agent" description="Installs the keygate skill and CLI for Claude Code or any agent that reads a SKILL.md; the CLI takes the key from an env file.">
+        <Panel title="Use it from a terminal or an agent" description="Installs the keygate skill and CLI into the agent's skills folder; the CLI takes the key from an env file.">
           <div className="flex flex-col gap-5">
             <div>
-              <p className="mb-2 text-sm">Install the skill and CLI:</p>
+              <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                <p className="text-sm">Install the skill and CLI:</p>
+                <AgentPicker value={agent} onChange={setAgent} />
+              </div>
               <div className="flex items-start gap-2">
-                <InkBlock className="min-w-0 flex-1">{installLines(origin)}</InkBlock>
-                <CopyButton value={installLines(origin)} />
+                <InkBlock className="min-w-0 flex-1">{install}</InkBlock>
+                <CopyButton value={install} />
               </div>
             </div>
             <div>
