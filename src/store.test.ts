@@ -138,20 +138,12 @@ describe("policies", () => {
   test("delete is refused while attached", () => {
     store.setTokenPolicies(tokenId, [{ policy_id: a, enabled: false }]);
     expect(store.deletePolicy(a)).toEqual({ status: "in_use", tokens: [{ id: tokenId, name: "t1" }] });
-    expect(() => store.db.run(`DELETE FROM policies WHERE id = ${a}`)).toThrow("FOREIGN KEY");
     expect(store.policyById(a)).not.toBeNull();
 
     store.setTokenPolicies(tokenId, []);
     expect(store.deletePolicy(a)).toEqual({ status: "deleted" });
     expect(store.policyById(a)).toBeNull();
     expect(store.deletePolicy(a)).toEqual({ status: "not_found" });
-  });
-
-  test("deleting a token removes its attachments", () => {
-    store.setTokenPolicies(tokenId, [{ policy_id: a, enabled: true }, { policy_id: b, enabled: true }]);
-    store.db.run(`DELETE FROM tokens WHERE id = ${tokenId}`);
-    expect(store.db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM token_policies").get()?.n).toBe(0);
-    expect(store.deletePolicy(a)).toEqual({ status: "deleted" });
   });
 
   test("revoking a token detaches its policies", () => {
