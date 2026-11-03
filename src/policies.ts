@@ -1,23 +1,86 @@
 import { bodyMediaKind, joinUrl, type Carrier } from "./inject.ts";
-import { isRecord, loadPolicy, messageOf, truncate, type Json, type LoadResult, type PolicyContext, type PolicyRequest } from "./policy.ts";
+import { isRecord, loadPolicy, messageOf, truncate, type Json, type LoadResult, type Policy, type PolicyContext, type PolicyDecision, type PolicyRequest, type PolicyResponse } from "./policy.ts";
 import type { RunnablePolicy } from "./store.ts";
 
 const MAX_BODY_BYTES = 1024 * 1024;
 const NULL_BODY_STATUSES = new Set([204, 205, 304]);
 
+type BodySkipped = NonNullable<PolicyContext["bodySkipped"]>;
+
+interface CacheEntry {
+  updatedAt: string;
+  loading: Promise<LoadResult>;
+  /** Leases holding the entry. A replaced entry is disposed once this drops to zero. */
+  users: number;
+  replaced: boolean;
+}
+
+interface LeasedPolicy {
+  row: RunnablePolicy;
+  entry: CacheEntry;
+}
+
 /** Loaded policies by id, rebuilt when a policy's updated_at moves forward. */
 export class PolicyCache {
-  private readonly entries = new Map<number, { updatedAt: string; loading: Promise<LoadResult> }>();
+  private readonly entries = new Map<number, CacheEntry>();
 
-  get(row: RunnablePolicy): Promise<LoadResult> {
-    const entry = this.entries.get(row.id);
+  /** Holds the loaded code for `rows` until the lease is disposed, even if a policy is edited meanwhile. */
+  lease(rows: readonly RunnablePolicy[]): PolicyLease {
+    return new PolicyLease(
+      rows.map((row) => ({ row, entry: this.acquire(row) })),
+      (entry) => this.release(entry),
+    );
+  }
+
+  private acquire(row: RunnablePolicy): CacheEntry {
+    let entry = this.entries.get(row.id);
     // A request holding an older snapshot of the row runs the newer cached code.
-    if (entry && entry.updatedAt >= row.updated_at) return entry.loading;
-    // Requests already awaiting the replaced entry registered first, so their hook call runs before this dispose.
-    if (entry) void entry.loading.then((r) => r.ok && r.policy.dispose());
-    const loading = loadPolicy(row.compiled).catch((e: unknown): LoadResult => ({ ok: false, message: messageOf(e) }));
-    this.entries.set(row.id, { updatedAt: row.updated_at, loading });
-    return loading;
+    if (!entry || entry.updatedAt < row.updated_at) {
+      if (entry) {
+        entry.replaced = true;
+        this.disposeIfUnused(entry);
+      }
+      const loading = loadPolicy(row.compiled).catch((e: unknown): LoadResult => ({ ok: false, message: messageOf(e) }));
+      entry = { updatedAt: row.updated_at, loading, users: 0, replaced: false };
+      this.entries.set(row.id, entry);
+    }
+    entry.users++;
+    return entry;
+  }
+
+  private release(entry: CacheEntry): void {
+    entry.users--;
+    this.disposeIfUnused(entry);
+  }
+
+  private disposeIfUnused(entry: CacheEntry): void {
+    if (entry.replaced && entry.users === 0) void entry.loading.then((r) => r.ok && r.policy.dispose());
+  }
+}
+
+/** A token's runnable policies in attachment order, loaded once for both phases of a request. */
+export class PolicyLease implements Disposable {
+  readonly entries: readonly LeasedPolicy[];
+  private readonly release: (entry: CacheEntry) => void;
+  private released = false;
+
+  constructor(entries: readonly LeasedPolicy[], release: (entry: CacheEntry) => void) {
+    this.entries = entries;
+    this.release = release;
+  }
+
+  get size(): number {
+    return this.entries.length;
+  }
+
+  needs(need: "body" | "responseBody"): boolean {
+    return this.entries.some(({ row }) => row.needs.includes(need));
+  }
+
+  [Symbol.dispose](): void {
+    if (this.released) return;
+    this.released = true;
+    for (const { entry } of this.entries) this.release(entry);
   }
 }
 
@@ -31,7 +94,6 @@ export type PolicyStop =
 export type RequestOutcome = { kind: "continue"; body?: string } | { kind: "invalid_body" } | PolicyStop;
 
 export interface RequestRun {
-  rows: RunnablePolicy[];
   request: Request;
   /** The outgoing request; its parsed body, if any, is the one the placements need. */
   carrier: Carrier;
@@ -42,7 +104,7 @@ export interface RequestRun {
   baseUrl: string;
   /** Header names a policy may not set. */
   reservedHeaders: ReadonlySet<string>;
-  ctx: Omit<PolicyContext, "method" | "bodySkipped">;
+  ctx: Omit<PolicyContext, "bodySkipped">;
 }
 
 interface Exposed {
@@ -50,17 +112,17 @@ interface Exposed {
   kind?: "json" | "form";
   /** Undecoded form text when the placements did not parse the body. */
   text?: string;
-  skipped?: NonNullable<PolicyContext["bodySkipped"]>;
+  skipped?: BodySkipped;
 }
 
 /**
  * Runs the onRequest hooks in order, each on the previous one's result, and applies the final
  * result to the carrier. Fields a policy left unchanged keep their original wire form.
  */
-export async function runRequestPolicies(cache: PolicyCache, run: RequestRun): Promise<RequestOutcome> {
-  const exposed = exposeBody(run);
+export async function runRequestPolicies(lease: PolicyLease, run: RequestRun): Promise<RequestOutcome> {
+  const exposed = exposeBody(lease, run);
   if (!exposed) return { kind: "invalid_body" };
-  const ctx: PolicyContext = { ...run.ctx, method: run.request.method, ...(exposed.skipped ? { bodySkipped: exposed.skipped } : {}) };
+  const ctx: PolicyContext = { ...run.ctx, ...(exposed.skipped ? { bodySkipped: exposed.skipped } : {}) };
   const original: PolicyRequest = {
     method: run.request.method,
     path: run.path,
@@ -68,40 +130,119 @@ export async function runRequestPolicies(cache: PolicyCache, run: RequestRun): P
     headers: Object.fromEntries(run.carrier.headers),
     body: exposed.value,
   };
-  let current = original;
-  for (const row of run.rows) {
+  const result = await runChain(
+    lease.entries,
+    original,
+    (policy, value) => policy.runRequest(value, ctx),
+    (before, after) => checkStep(run, exposed, before, after),
+  );
+  if (result.kind !== "continue") return result;
+  try {
+    const body = apply(run, exposed, original, result.value);
+    return body === undefined ? { kind: "continue" } : { kind: "continue", body };
+  } catch (e) {
+    return failure(lease.entries.at(-1)?.row.name ?? "", messageOf(e));
+  }
+}
+
+/** What the client gets as the response body: the provider stream, its buffered bytes, a rewritten JSON body, or nothing. */
+export type ResponseBody = ReadableStream<Uint8Array> | Uint8Array<ArrayBuffer> | string | null;
+
+/** `upstream_error` is a provider body that failed while it was being read. */
+export type ResponseOutcome = { kind: "continue"; status: number; body: ResponseBody } | { kind: "upstream_error"; message: string } | PolicyStop;
+
+export interface ResponseRun {
+  response: Response;
+  /** Provider headers the client gets; header edits are written into it. */
+  headers: Headers;
+  /** Header names a policy may not set. */
+  reservedHeaders: ReadonlySet<string>;
+  ctx: Omit<PolicyContext, "bodySkipped">;
+}
+
+interface ExposedResponse {
+  value: Json | undefined;
+  skipped?: BodySkipped;
+  /** The provider response has no body. */
+  empty: boolean;
+  body: ResponseBody;
+}
+
+/**
+ * Runs the onResponse hooks last to first, each on the previous one's result. Status and header
+ * edits always apply; the body is exposed only for JSON up to 1 MB. When the chain stops, the
+ * provider body is cancelled.
+ */
+export async function runResponsePolicies(lease: PolicyLease, run: ResponseRun): Promise<ResponseOutcome> {
+  let exposed: ExposedResponse;
+  try {
+    exposed = await exposeResponseBody(lease, run);
+  } catch (e) {
+    return { kind: "upstream_error", message: messageOf(e) };
+  }
+  const outcome = await responseChain(lease, run, exposed);
+  if (outcome.kind !== "continue" && exposed.body instanceof ReadableStream) void exposed.body.cancel().catch(() => undefined);
+  return outcome;
+}
+
+async function responseChain(lease: PolicyLease, run: ResponseRun, exposed: ExposedResponse): Promise<ResponseOutcome> {
+  const ctx: PolicyContext = { ...run.ctx, ...(exposed.skipped ? { bodySkipped: exposed.skipped } : {}) };
+  const headers = Object.fromEntries([...run.headers].filter(([name]) => name !== "set-cookie"));
+  const original: PolicyResponse = { status: run.response.status, headers, body: exposed.value };
+  const result = await runChain(
+    [...lease.entries].reverse(),
+    original,
+    (policy, value) => policy.runResponse(value, ctx),
+    (before, after) => checkResponseStep(run, exposed, before, after),
+  );
+  if (result.kind !== "continue") return result;
+  const final = result.value;
+  try {
+    for (const name of Object.keys(original.headers)) if (!Object.hasOwn(final.headers, name)) run.headers.delete(name);
+    for (const [name, value] of Object.entries(final.headers)) if (original.headers[name] !== value) run.headers.set(name, value);
+    return { kind: "continue", status: final.status, body: deepEqual(original.body, final.body) ? exposed.body : JSON.stringify(final.body) };
+  } catch (e) {
+    return failure(lease.entries[0]?.row.name ?? "", messageOf(e));
+  }
+}
+
+/** Runs one hook per policy in the given order; the first deny, respond or error stops the chain. */
+async function runChain<T>(
+  entries: readonly LeasedPolicy[],
+  initial: T,
+  hook: (policy: Policy, value: T) => PolicyDecision<T>,
+  check: (before: T, after: T) => string | undefined,
+): Promise<{ kind: "continue"; value: T } | PolicyStop> {
+  let current = initial;
+  for (const { row, entry } of entries) {
     try {
-      const loaded = await cache.get(row);
+      const loaded = await entry.loading;
       if (!loaded.ok) return failure(row.name, loaded.message);
-      const decision = loaded.policy.runRequest(current, ctx);
-      switch (decision.kind) {
-        case "error":
-          return failure(row.name, decision.message);
-        case "deny":
-          return { ...decision, policy: row.name };
-        case "respond":
-          if (decision.body !== undefined && NULL_BODY_STATUSES.has(decision.status)) return failure(row.name, `respond() status ${decision.status} cannot have a body`);
-          return { ...decision, policy: row.name };
-        case "continue": {
-          const problem = checkStep(run, exposed, current, decision.value);
-          if (problem) return failure(row.name, problem);
-          current = decision.value;
-          break;
-        }
-        default: {
-          const unhandled: never = decision;
-          return unhandled;
-        }
-      }
+      const decision = hook(loaded.policy, current);
+      if (decision.kind !== "continue") return stopFor(row.name, decision);
+      const problem = check(current, decision.value);
+      if (problem) return failure(row.name, problem);
+      current = decision.value;
     } catch (e) {
       return failure(row.name, messageOf(e));
     }
   }
-  try {
-    const body = apply(run, exposed, original, current);
-    return body === undefined ? { kind: "continue" } : { kind: "continue", body };
-  } catch (e) {
-    return failure(run.rows.at(-1)?.name ?? "", messageOf(e));
+  return { kind: "continue", value: current };
+}
+
+function stopFor(policy: string, decision: Exclude<PolicyDecision<unknown>, { kind: "continue" }>): PolicyStop {
+  switch (decision.kind) {
+    case "error":
+      return failure(policy, decision.message);
+    case "deny":
+      return { ...decision, policy };
+    case "respond":
+      if (decision.body !== undefined && NULL_BODY_STATUSES.has(decision.status)) return failure(policy, `respond() status ${decision.status} cannot have a body`);
+      return { ...decision, policy };
+    default: {
+      const unhandled: never = decision;
+      return unhandled;
+    }
   }
 }
 
@@ -127,11 +268,11 @@ function failure(policy: string, message: string): PolicyStop {
 }
 
 /** Returns undefined when a needed JSON body does not parse. */
-function exposeBody(run: RequestRun): Exposed | undefined {
+function exposeBody(lease: PolicyLease, run: RequestRun): Exposed | undefined {
   const { request, carrier } = run;
   const length = request.headers.get("content-length");
   if (request.method === "GET" || request.method === "HEAD" || length === "0" || request.body === null) return { value: undefined };
-  if (!run.rows.some((r) => r.needs.includes("body"))) return { value: undefined, skipped: "not_requested" };
+  if (!lease.needs("body")) return { value: undefined, skipped: "not_requested" };
   const kind = bodyMediaKind(request.headers.get("content-type"));
   if (!kind) return { value: undefined, skipped: "unparsed" };
   if (length === null || !/^\d+$/.test(length) || Number(length) > MAX_BODY_BYTES) return { value: undefined, skipped: "too_large" };
@@ -161,6 +302,71 @@ function checkStep(run: RequestRun, exposed: Exposed, before: PolicyRequest, aft
   if (after.body === undefined) return "req.body cannot be removed";
   if (exposed.kind === "form" && !isStringRecord(after.body)) return "req.body must be an object of strings for a form request";
   if (run.carrier.body?.kind === "json" && !isRecord(after.body)) return "req.body must stay a JSON object for this upstream";
+  return undefined;
+}
+
+async function exposeResponseBody(lease: PolicyLease, run: ResponseRun): Promise<ExposedResponse> {
+  const { response } = run;
+  const length = response.headers.get("content-length");
+  if (response.body === null || run.ctx.method === "HEAD" || NULL_BODY_STATUSES.has(response.status) || length === "0") return { value: undefined, empty: true, body: response.body };
+  const passThrough = (skipped: BodySkipped, body: ResponseBody = response.body): ExposedResponse => ({ value: undefined, skipped, empty: false, body });
+  if (!lease.needs("responseBody")) return passThrough("not_requested");
+  if (bodyMediaKind(response.headers.get("content-type")) !== "json") return passThrough("unparsed");
+  if (length === null || !/^\d+$/.test(length) || Number(length) > MAX_BODY_BYTES) return passThrough("too_large");
+  // Content-Length counts encoded bytes; the cap also bounds what decompression produces.
+  const read = await readCapped(response.body, MAX_BODY_BYTES);
+  if (read instanceof ReadableStream) return passThrough("too_large", read);
+  try {
+    return { value: JSON.parse(new TextDecoder().decode(read)), empty: false, body: read };
+  } catch {
+    return passThrough("unparsed", read);
+  }
+}
+
+/** Reads up to `max` bytes. Past that, returns a stream that replays what was read and then the rest. */
+async function readCapped(body: ReadableStream<Uint8Array>, max: number): Promise<Uint8Array<ArrayBuffer> | ReadableStream<Uint8Array>> {
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    total += value.byteLength;
+    if (total > max) {
+      return new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (const chunk of chunks) controller.enqueue(chunk);
+        },
+        async pull(controller) {
+          const next = await reader.read();
+          if (next.done) controller.close();
+          else controller.enqueue(next.value);
+        },
+        cancel(reason) {
+          return reader.cancel(reason);
+        },
+      });
+    }
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
+}
+
+/** What one onResponse hook changed that keygate cannot apply, or undefined. */
+function checkResponseStep(run: ResponseRun, exposed: ExposedResponse, before: PolicyResponse, after: PolicyResponse): string | undefined {
+  for (const [name, value] of Object.entries(after.headers)) {
+    if ((name === "set-cookie" || run.reservedHeaders.has(name)) && before.headers[name] !== value) return `res.headers["${name}"] cannot be set by a policy`;
+  }
+  if (after.status !== before.status && !exposed.empty && NULL_BODY_STATUSES.has(after.status)) return `res.status ${after.status} cannot be used on a response with a body`;
+  if (deepEqual(before.body, after.body)) return undefined;
+  if (before.body === undefined) return exposed.skipped ? `res.body cannot be changed when the body was not read (${exposed.skipped})` : "res.body cannot be set on a response without a body";
+  if (after.body === undefined) return "res.body cannot be removed";
   return undefined;
 }
 

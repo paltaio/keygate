@@ -1,8 +1,8 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import { loadEnv } from "./env.ts";
-import { PolicyCache } from "./policies.ts";
+import { PolicyCache, type PolicyLease } from "./policies.ts";
 import { compilePolicy } from "./policy.ts";
-import { createProxy, resolveTarget, serveDirectory } from "./proxy.ts";
+import { clientIp, createProxy, resolveTarget, serveDirectory } from "./proxy.ts";
 import { Store, type Placement } from "./store.ts";
 
 const env = loadEnv({ KEYGATE_HOST: "keygate.test", KEYGATE_DATA_DIR: ":memory:" });
@@ -307,6 +307,10 @@ describe("proxy", () => {
 
 type Setup = ReturnType<typeof setup>;
 
+function responseHook(name: string, body: string, needs: string[] = []): string {
+  return `export const meta = { name: "${name}", needs: ${JSON.stringify(needs)} };\nexport function onResponse(res, ctx) {\n${body}\n}`;
+}
+
 function hook(name: string, body: string, needs: string[] = []): string {
   return `export const meta = { name: "${name}", needs: ${JSON.stringify(needs)} };\nexport function onRequest(req, ctx) {\n${body}\n}`;
 }
@@ -563,18 +567,28 @@ describe("request policies", () => {
     expect(c.captured[0]?.headers.get("x-api-key")).toBe("REAL");
   });
 
-  test("an older snapshot of a policy gets the newer cached code", async () => {
+  test("an older snapshot gets the newer cached code; replaced code lives until its lease ends", async () => {
     const [v1, v2] = await Promise.all([compilePolicy(hook("v", `req.headers["x-v"] = "1";`)), compilePolicy(hook("v", `req.headers["x-v"] = "2";`))]);
     if (!v1.ok || !v2.ok) throw new Error("compile failed");
     const cache = new PolicyCache();
     const row = { id: 1, name: "v", needs: [] };
-    const newer = await cache.get({ ...row, compiled: v2.policy.js, updated_at: "2026-01-01T00:00:00.002Z" });
-    const older = await cache.get({ ...row, compiled: v1.policy.js, updated_at: "2026-01-01T00:00:00.001Z" });
-    if (!newer.ok || !older.ok) throw new Error("load failed");
-    expect(older.policy).toBe(newer.policy);
-    const decision = newer.policy.runRequest({ method: "GET", path: "/", query: {}, headers: {}, body: undefined }, { token: { id: 1, name: "t", scopes: [] }, upstream: { slug: "up", name: "Up", base_url: "https://up.example" }, origin: null, ip: null, method: "GET" });
-    expect(decision).toMatchObject({ kind: "continue", value: { headers: { "x-v": "2" } } });
-    newer.policy.dispose();
+    const older = { ...row, compiled: v1.policy.js, updated_at: "2026-01-01T00:00:00.001Z" };
+    const first = cache.lease([older]);
+    const newer = cache.lease([{ ...row, compiled: v2.policy.js, updated_at: "2026-01-01T00:00:00.002Z" }]);
+    const stale = cache.lease([older]);
+    const version = async (lease: PolicyLease): Promise<string | undefined> => {
+      const loaded = await lease.entries[0]?.entry.loading;
+      if (!loaded?.ok) throw new Error("load failed");
+      const decision = loaded.policy.runRequest({ method: "GET", path: "/", query: {}, headers: {}, body: undefined }, { token: { id: 1, name: "t", scopes: [] }, upstream: { slug: "up", name: "Up", base_url: "https://up.example" }, origin: null, ip: null, method: "GET" });
+      return decision.kind === "continue" ? decision.value.headers["x-v"] : decision.kind;
+    };
+    expect(await version(first)).toBe("1");
+    expect(await version(stale)).toBe("2");
+    first[Symbol.dispose]();
+    expect(await version(first)).toBe("error");
+    newer[Symbol.dispose]();
+    stale[Symbol.dispose]();
+    expect(await version(newer)).toBe("2");
   });
 
   test("policies run in attachment order and the first stop ends the chain", async () => {
@@ -740,5 +754,205 @@ describe("request policies", () => {
     const rows = c.store.requests({ limit: 10 });
     expect(rows.map((r) => r.error)).toEqual(["disabled_token", "upstream_not_in_scope", "origin_not_allowed"]);
     expect(rows.every((r) => r.policy === null)).toBe(true);
+  });
+});
+
+function jsonResponse(text: string, status = 200, headers: Record<string, string> = {}): Response {
+  return new Response(text, { status, headers: { "content-type": "application/json", "content-length": String(Buffer.byteLength(text)), ...headers } });
+}
+
+describe("response policies", () => {
+  test("status and header edits apply; the body streams through", async () => {
+    const c = setup(apiKeyHeader);
+    await attach(c, [responseHook("edit", `res.status = 202; res.headers["X-Added"] = "1"; delete res.headers["x-up"]; res.headers["x-skipped"] = String(ctx.bodySkipped);`)]);
+    const res = await call(c, "/x", { headers: { origin: "https://app.test" } });
+    expect(res.status).toBe(202);
+    expect(res.headers.get("x-added")).toBe("1");
+    expect(res.headers.has("x-up")).toBe(false);
+    expect(res.headers.get("x-skipped")).toBe("not_requested");
+    expect(res.headers.get("access-control-allow-origin")).toBe("https://app.test");
+    expect(await res.text()).toBe("upstream-body");
+    expect(c.store.requests({ limit: 1 })[0]).toMatchObject({ status: 202, error: null, policy: null, bytes_out: 13 });
+  });
+
+  test("set-cookie is hidden from policies and passes through", async () => {
+    const headers = new Headers({ "content-type": "text/plain" });
+    headers.append("set-cookie", "a=1");
+    headers.append("set-cookie", "b=2");
+    const c = setup(apiKeyHeader, () => new Response("x", { headers }));
+    await attach(c, [responseHook("cookies", `res.headers["x-cookie"] = String(res.headers["set-cookie"]);`)]);
+    const res = await call(c, "/x");
+    expect(res.headers.get("x-cookie")).toBe("undefined");
+    expect(res.headers.getSetCookie()).toEqual(["a=1", "b=2"]);
+  });
+
+  test("a JSON body is exposed and rewritten", async () => {
+    const c = setup(apiKeyHeader, () => jsonResponse('{ "user" : "ann", "secret" : "s3" }', 200, { "content-type": "application/json; charset=utf-8" }));
+    await attach(c, [responseHook("redact", `res.body.secret = "[redacted]";`, ["responseBody"])]);
+    const res = await call(c, "/x");
+    expect(res.headers.get("content-type")).toBe("application/json; charset=utf-8");
+    const text = await res.text();
+    expect(JSON.parse(text)).toEqual({ user: "ann", secret: "[redacted]" });
+    expect(c.store.requests({ limit: 1 })[0]?.bytes_out).toBe(Buffer.byteLength(text));
+  });
+
+  test("an exposed body left unchanged keeps its bytes", async () => {
+    const c = setup(apiKeyHeader, () => jsonResponse('{ "a" : 1 }'));
+    await attach(c, [responseHook("look", `res.headers["x-a"] = String(res.body.a);`, ["responseBody"])]);
+    const res = await call(c, "/x");
+    expect(res.headers.get("x-a")).toBe("1");
+    expect(await res.text()).toBe('{ "a" : 1 }');
+  });
+
+  test("SSE streams through byte for byte with header edits applied", async () => {
+    const events = ["data: a\n\n", "data: b\n\n"];
+    const c = setup(apiKeyHeader, () => {
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (const e of events) controller.enqueue(new TextEncoder().encode(e));
+          controller.close();
+        },
+      });
+      return new Response(stream, { headers: { "content-type": "text/event-stream" } });
+    });
+    await attach(c, [responseHook("sse", `res.headers["x-skipped"] = String(ctx.bodySkipped); res.headers["x-body"] = String(res.body);`, ["responseBody"])]);
+    const res = await call(c, "/x");
+    expect(res.headers.get("x-skipped")).toBe("unparsed");
+    expect(res.headers.get("x-body")).toBe("undefined");
+    expect(res.headers.get("content-type")).toBe("text/event-stream");
+    expect(await res.text()).toBe(events.join(""));
+    expect(c.store.requests({ limit: 1 })[0]?.bytes_out).toBe(18);
+  });
+
+  test("JSON over 1 MB, declared or actual, is too_large and passes through", async () => {
+    const big = JSON.stringify({ pad: "x".repeat(1024 * 1024) });
+    let declared = String(Buffer.byteLength(big));
+    const c = setup(apiKeyHeader, () => new Response(big, { headers: { "content-type": "application/json", "content-length": declared } }));
+    await attach(c, [responseHook("size", `res.headers["x-skipped"] = String(ctx.bodySkipped);`, ["responseBody"])]);
+    const declaredLarge = await call(c, "/x");
+    expect(declaredLarge.headers.get("x-skipped")).toBe("too_large");
+    expect(await declaredLarge.text()).toBe(big);
+    declared = "10";
+    const actualLarge = await call(c, "/x");
+    expect(actualLarge.headers.get("x-skipped")).toBe("too_large");
+    expect(await actualLarge.text()).toBe(big);
+  });
+
+  test("a response without a body has no bodySkipped", async () => {
+    const c = setup(apiKeyHeader, () => new Response(null, { status: 204 }));
+    await attach(c, [responseHook("empty", `res.headers["x-skipped"] = String(ctx.bodySkipped); res.status = 200;`, ["responseBody"])]);
+    const res = await call(c, "/x");
+    expect(res.status).toBe(200);
+    expect(res.headers.get("x-skipped")).toBe("undefined");
+  });
+
+  test("deny and respond replace the provider response, which is cancelled; the key still records it", async () => {
+    let cancelled = 0;
+    const c = setup(apiKeyHeader, () => {
+      const stream = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          controller.enqueue(new TextEncoder().encode("secret"));
+        },
+        cancel() {
+          cancelled++;
+        },
+      });
+      return new Response(stream, { status: 401, headers: { "content-type": "text/plain" } });
+    });
+    await attach(c, [responseHook("replace", `if (ctx.method === "POST") return respond(200, { "x-r": "1" }, { replaced: true }); return deny(424, "provider refused");`)]);
+    const denied = await call(c, "/x", { headers: { origin: "https://app.test" } });
+    expect(denied.status).toBe(424);
+    expect(denied.headers.get("access-control-allow-origin")).toBe("https://app.test");
+    expect(await denied.json()).toEqual({ error: "policy_denied", policy: "replace", message: "provider refused" });
+    const responded = await call(c, "/x", { method: "POST", headers: { "content-type": "text/plain" }, body: "q" });
+    expect(responded.status).toBe(200);
+    expect(responded.headers.get("x-r")).toBe("1");
+    expect(await responded.text()).toBe('{"replaced":true}');
+    expect(cancelled).toBe(2);
+    expect(c.store.keyById(c.keyId)?.failing_status).toBe(401);
+    expect(c.store.requests({ limit: 2 }).map((r) => [r.status, r.error, r.policy])).toEqual([
+      [200, "policy_response", "replace"],
+      [424, "policy_denied", "replace"],
+    ]);
+  });
+
+  test("a throwing onResponse fails closed", async () => {
+    const c = setup(apiKeyHeader);
+    await attach(c, [responseHook("boom", `throw new Error("bad response");`)]);
+    const res = await call(c, "/x");
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: "policy_error", policy: "boom", message: "Error: bad response" });
+    expect(c.store.requests({ limit: 1 })[0]).toMatchObject({ status: 500, error: "policy_error", policy: "boom" });
+  });
+
+  test("onResponse runs last to first after onRequest ran first to last", async () => {
+    const c = setup(apiKeyHeader);
+    const both = (name: string) =>
+      `export const meta = { name: "${name}" };
+      export function onRequest(req) { req.headers["x-order"] = (req.headers["x-order"] ?? "") + "${name}"; }
+      export function onResponse(res) { res.headers["x-order"] = (res.headers["x-order"] ?? "") + "${name}"; }`;
+    await attach(c, [both("a"), both("b"), responseHook("c", `res.headers["x-order"] = (res.headers["x-order"] ?? "") + "c";`)]);
+    const res = await call(c, "/x");
+    expect(c.captured[0]?.headers.get("x-order")).toBe("ab");
+    expect(res.headers.get("x-order")).toBe("cba");
+  });
+
+  test("a provider body that fails while read for a policy is a 502", async () => {
+    const c = setup(apiKeyHeader, () => {
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('{"a":'));
+          controller.error(new Error("connection reset"));
+        },
+      });
+      return new Response(stream, { headers: { "content-type": "application/json", "content-length": "20" } });
+    });
+    await attach(c, [responseHook("reader", "", ["responseBody"])]);
+    const res = await call(c, "/x");
+    expect(res.status).toBe(502);
+    expect(c.store.requests({ limit: 1 })[0]).toMatchObject({ error: "upstream_unreachable", policy: null });
+  });
+
+  test("does not run on keygate's own 502", async () => {
+    const c = setup(apiKeyHeader, () => {
+      throw new Error("connect ECONNREFUSED");
+    });
+    await attach(c, [responseHook("boom", `throw new Error("ran");`)]);
+    const res = await call(c, "/x");
+    expect(res.status).toBe(502);
+    expect(c.store.requests({ limit: 1 })[0]).toMatchObject({ error: "upstream_unreachable", policy: null });
+  });
+
+  test("changes keygate cannot apply are policy errors", async () => {
+    const cases: [string, string, string[]][] = [
+      ["not-exposed", `res.body = { a: 1 };`, []],
+      ["removed", `res.body = undefined;`, ["responseBody"]],
+      ["content-length", `res.headers["content-length"] = "1";`, []],
+      ["content-encoding", `res.headers["content-encoding"] = "gzip";`, []],
+      ["set-cookie", `res.headers["set-cookie"] = "a=1";`, []],
+      ["no-content", `res.status = 204;`, []],
+    ];
+    for (const [name, body, needs] of cases) {
+      const c = setup(apiKeyHeader, () => jsonResponse('{"a":1}'));
+      await attach(c, [responseHook(name, body, needs)]);
+      const res = await call(c, "/x");
+      expect([name, res.status]).toEqual([name, 500]);
+      expect(await res.json()).toMatchObject({ error: "policy_error", policy: name });
+    }
+  });
+});
+
+describe("clientIp", () => {
+  const socket = () => "192.0.2.9";
+  test("no trusted hops uses the socket address", () => {
+    expect(clientIp(0, "1.1.1.1", socket)).toBe("192.0.2.9");
+  });
+  test("counts hops from the right of X-Forwarded-For", () => {
+    expect(clientIp(1, "1.1.1.1, 10.0.0.2", socket)).toBe("10.0.0.2");
+    expect(clientIp(2, "1.1.1.1, 10.0.0.2", socket)).toBe("1.1.1.1");
+  });
+  test("more hops than entries is null", () => {
+    expect(clientIp(3, "1.1.1.1, 10.0.0.2", socket)).toBeNull();
+    expect(clientIp(1, null, socket)).toBeNull();
   });
 });

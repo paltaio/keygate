@@ -8,6 +8,8 @@ const schema = z.object({
   KEYGATE_LOG_RETENTION_DAYS: z.coerce.number().int().min(0).default(30),
   KEYGATE_SESSION_DAYS: z.coerce.number().int().positive().default(14),
   KEYGATE_UPSTREAM_TIMEOUT_MS: z.coerce.number().int().positive().default(300_000),
+  /** Proxies in front of keygate that append to X-Forwarded-For. 0 uses the socket address. */
+  KEYGATE_TRUSTED_PROXY_HOPS: z.coerce.number().int().min(0).default(0),
   KEYGATE_ADMIN_EMAIL: z.email().optional(),
   KEYGATE_ADMIN_PASSWORD: z.string().min(8).optional(),
   KEYGATE_ADMIN_NAME: z.string().default("Admin"),

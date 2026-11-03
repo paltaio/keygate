@@ -1,11 +1,11 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { Hono } from "hono";
-import { serveStatic } from "hono/bun";
+import { Hono, type Context } from "hono";
+import { getConnInfo, serveStatic } from "hono/bun";
 import { adminRoutes } from "./admin.ts";
 import { bootstrapAdmin } from "./auth.ts";
 import { loadEnv } from "./env.ts";
-import { createProxy, isUpstreamHost, serveDirectory } from "./proxy.ts";
+import { clientIp, createProxy, isUpstreamHost, serveDirectory } from "./proxy.ts";
 import { Store } from "./store.ts";
 
 const env = loadEnv();
@@ -13,11 +13,13 @@ mkdirSync(env.KEYGATE_DATA_DIR, { recursive: true });
 const store = new Store(join(env.KEYGATE_DATA_DIR, "keygate.db"));
 await bootstrapAdmin(store, env);
 
-const proxy = createProxy({ store, env });
+const handleProxy = createProxy({ store, env });
+const proxy = (c: Context): Promise<Response> =>
+  handleProxy(c.req.raw, clientIp(env.KEYGATE_TRUSTED_PROXY_HOPS, c.req.header("x-forwarded-for") ?? null, () => getConnInfo(c).remote.address ?? null));
 const app = new Hono();
 
 app.use("*", async (c, next) => {
-  if (isUpstreamHost(c.req.header("host") ?? null, env.KEYGATE_HOST)) return proxy(c.req.raw);
+  if (isUpstreamHost(c.req.header("host") ?? null, env.KEYGATE_HOST)) return proxy(c);
   await next();
 });
 
@@ -45,7 +47,7 @@ if (hasWeb) {
   console.warn("keygate: dist/web is missing; run `bun run build` to serve the dashboard");
 }
 
-app.all("*", (c) => proxy(c.req.raw));
+app.all("*", proxy);
 
 function prune(): void {
   const removed = store.pruneRequests(env.KEYGATE_LOG_RETENTION_DAYS);

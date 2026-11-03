@@ -1,6 +1,6 @@
 import type { Env } from "./env.ts";
 import { TOKEN_QUERY, bodyKinds, bodyMediaKind, extractToken, inject, joinUrl, parseCookies, serializeBody, serializeCookies, type Carrier, type ParsedBody } from "./inject.ts";
-import { PolicyCache, customResponse, runRequestPolicies, type PolicyStop } from "./policies.ts";
+import { PolicyCache, customResponse, runRequestPolicies, runResponsePolicies, type PolicyStop, type ResponseBody } from "./policies.ts";
 import type { Json } from "./policy.ts";
 import { MissingSecretError, RESERVED_SLUGS, missingSecrets, parseList, parsePlacements, parseSecrets, placeholderNames, type Placement, type ProviderKey, type Store, type Token, type Upstream } from "./store.ts";
 
@@ -112,6 +112,16 @@ export function directoryText(origin: string, upstreams: Upstream[] | undefined)
   else if (!upstreams.length) lines.push("This token reaches no upstreams.");
   else for (const u of upstreams) lines.push(`- [${u.name}](${origin}/${u.slug}/llms.txt): \`${origin}/${u.slug}\` to ${u.base_url}`);
   return `${lines.join("\n")}\n`;
+}
+
+/**
+ * The client address: the socket peer when no proxy is trusted, else the `hops`-th entry from the
+ * right of X-Forwarded-For, or null when the header has fewer entries.
+ */
+export function clientIp(hops: number, forwardedFor: string | null, socket: () => string | null): string | null {
+  if (hops === 0) return socket();
+  const entries = forwardedFor ? forwardedFor.split(",").map((e) => e.trim()) : [];
+  return entries[entries.length - hops] || null;
 }
 
 function publicOrigin(env: Env, url: URL): string {
@@ -305,22 +315,23 @@ export function createProxy(options: ProxyOptions): (req: Request, ip?: string |
     }
 
     let rawBody: string | ArrayBuffer | undefined = body.raw;
-    const runnable = store.runnablePolicies(token.id);
-    if (runnable.length) {
-      const outcome = await runRequestPolicies(policies, {
-        rows: runnable,
+    using lease = policies.lease(store.runnablePolicies(token.id));
+    const policyCtx = {
+      token: { id: token.id, name: token.name, scopes },
+      upstream: { slug: upstream.slug, name: upstream.name, base_url: upstream.base_url },
+      origin,
+      ip,
+      method: req.method,
+    };
+    if (lease.size) {
+      const outcome = await runRequestPolicies(lease, {
         request: req,
         carrier,
         raw: body.raw,
         path: target.path,
         baseUrl: upstream.base_url,
         reservedHeaders: REQUEST_STRIP,
-        ctx: {
-          token: { id: token.id, name: token.name, scopes },
-          upstream: { slug: upstream.slug, name: upstream.name, base_url: upstream.base_url },
-          origin,
-          ip,
-        },
+        ctx: policyCtx,
       });
       if (outcome.kind === "invalid_body") return reject(token.id, 400, "invalid_body", "The request body could not be parsed", body.bytes);
       if (outcome.kind !== "continue") return stop(token.id, outcome, body.bytes);
@@ -364,25 +375,35 @@ export function createProxy(options: ProxyOptions): (req: Request, ip?: string |
 
     const outHeaders = new Headers();
     for (const [name, value] of res.headers) if (!RESPONSE_STRIP.has(name)) outHeaders.append(name, value);
+    let status = res.status;
+    let resBody: ResponseBody = res.body;
+    if (lease.size) {
+      const outcome = await runResponsePolicies(lease, { response: res, headers: outHeaders, reservedHeaders: RESPONSE_STRIP, ctx: policyCtx });
+      if (outcome.kind === "upstream_error") return reject(token.id, 502, "upstream_unreachable", outcome.message, body.bytes);
+      if (outcome.kind !== "continue") return stop(token.id, outcome, body.bytes);
+      status = outcome.status;
+      resBody = outcome.body;
+    }
     if (origin) for (const [name, value] of Object.entries(corsHeaders(origin, req))) outHeaders.set(name, value);
 
-    if (!res.body) {
-      log({ token_id: token.id, status: res.status, bytes_in: body.bytes, bytes_out: 0, error: null });
-      return new Response(null, { status: res.status, headers: outHeaders });
+    if (!(resBody instanceof ReadableStream)) {
+      const bytes = resBody === null ? 0 : typeof resBody === "string" ? Buffer.byteLength(resBody) : resBody.byteLength;
+      log({ token_id: token.id, status, bytes_in: body.bytes, bytes_out: bytes, error: null });
+      return new Response(resBody, { status, headers: outHeaders });
     }
 
     let bytesOut = 0;
-    const counted = res.body.pipeThrough(
+    const counted = resBody.pipeThrough(
       new TransformStream<Uint8Array, Uint8Array>({
         transform(chunk, controller) {
           bytesOut += chunk.byteLength;
           controller.enqueue(chunk);
         },
         flush() {
-          log({ token_id: token.id, status: res.status, bytes_in: body.bytes, bytes_out: bytesOut, error: null });
+          log({ token_id: token.id, status, bytes_in: body.bytes, bytes_out: bytesOut, error: null });
         },
       }),
     );
-    return new Response(counted, { status: res.status, headers: outHeaders });
+    return new Response(counted, { status, headers: outHeaders });
   };
 }
