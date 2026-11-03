@@ -1,10 +1,11 @@
-import { Activity, Community, Computer, HalfMoon, IconoirProvider, Key, List, LogOut, Server, SidebarCollapse, SidebarExpand, SunLight, Terminal } from "iconoir-react";
+import { Activity, Code, Community, Computer, HalfMoon, IconoirProvider, Key, List, LogOut, Server, SidebarCollapse, SidebarExpand, SunLight, Terminal } from "iconoir-react";
 import { useEffect, useState } from "react";
 import { Link, Route, Router, Switch, useLocation } from "wouter";
 import { api, onUnauthenticated, type User } from "./api.ts";
 import ApiKeys from "./pages/ApiKeys.tsx";
 import Login from "./pages/Login.tsx";
 import Overview from "./pages/Overview.tsx";
+import { NewPolicyPage, PoliciesPage, PolicyPage } from "./pages/Policies.tsx";
 import Requests from "./pages/Requests.tsx";
 import { EditTokenPage, NewTokenPage, TokensPage } from "./pages/Tokens.tsx";
 import UpstreamDetail from "./pages/UpstreamDetail.tsx";
@@ -21,6 +22,7 @@ const NAV: { href: string; label: string; icon: typeof Activity }[] = [
   { href: "/", label: "Overview", icon: Activity },
   { href: "/upstreams", label: "Upstreams", icon: Server },
   { href: "/tokens", label: "Tokens", icon: Key },
+  { href: "/policies", label: "Policies", icon: Code },
   { href: "/requests", label: "Requests", icon: List },
   { href: "/users", label: "Users", icon: Community },
   { href: "/api-keys", label: "API keys", icon: Terminal },
@@ -133,6 +135,9 @@ function Shell({ user, onSignOut }: { user: User; onSignOut: () => void }) {
               <Route path="/tokens" component={TokensPage} />
               <Route path="/tokens/new" component={NewTokenPage} />
               <Route path="/tokens/:id">{(params) => <EditTokenPage id={Number(params.id)} />}</Route>
+              <Route path="/policies" component={PoliciesPage} />
+              <Route path="/policies/new" component={NewPolicyPage} />
+              <Route path="/policies/:id">{(params) => <PolicyPage id={Number(params.id)} />}</Route>
               <Route path="/requests" component={Requests} />
               <Route path="/users" component={Users} />
               <Route path="/api-keys" component={ApiKeys} />
