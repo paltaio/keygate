@@ -1,7 +1,7 @@
 import { useState, type ReactNode } from "react";
 import { useLocation } from "wouter";
-import { api, type CreatedToken, type Token } from "../api.ts";
-import { formatDate, formatDateTime, formatRelative, isPast } from "../format.ts";
+import { api, type CreatedToken, type Token, type TokenPolicy } from "../api.ts";
+import { errorMessage, formatDate, formatDateTime, formatRelative, isPast } from "../format.ts";
 import { useAction, useLoad } from "../hooks.ts";
 import { Button, ConfirmDialog, CopyButton, InkBlock, LinkButton, LoadError, Mono, Notice, PageHeader, Panel, Pill, TableMessage, TextLink } from "../ui.tsx";
 import TokenForm from "./TokenForm.tsx";
@@ -21,6 +21,20 @@ function Origins({ origins }: { origins: string[] }) {
       {shown.join(", ")}
       {rest > 0 ? ` +${rest}` : ""}
     </Mono>
+  );
+}
+
+function Policies({ policies }: { policies: TokenPolicy[] }) {
+  const label = (p: TokenPolicy): string => (p.enabled ? p.name : `${p.name} (off)`);
+  return (
+    <span className="block text-content-muted" title={policies.length ? `Policies, in order: ${policies.map(label).join(", ")}` : undefined}>
+      {policies.slice(0, 3).map((p) => (
+        <Mono key={p.policy_id} className="block max-w-[24ch] truncate">
+          {label(p)}
+        </Mono>
+      ))}
+      {policies.length > 3 ? <span className="text-xs">+{policies.length - 3} more</span> : null}
+    </span>
   );
 }
 
@@ -117,6 +131,7 @@ export function TokensPage() {
                     <span className="block max-w-[24ch] truncate" title={t.name}>
                       {t.name}
                     </span>
+                    <Policies policies={t.policies} />
                   </td>
                   <td>
                     <Mono title={t.rotated_at ? `Rotated ${formatDateTime(t.rotated_at)}` : undefined}>{t.hint}</Mono>
@@ -197,9 +212,14 @@ export function TokensPage() {
   );
 }
 
-function CreatedTokenPanel({ created, title, actions }: { created: CreatedToken; title: string; actions: ReactNode }) {
+function CreatedTokenPanel({ created, title, actions, warning }: { created: CreatedToken; title: string; actions: ReactNode; warning?: string | null | undefined }) {
   return (
     <Panel title={title}>
+      {warning ? (
+        <Notice kind="error" className="mb-4">
+          {warning}
+        </Notice>
+      ) : null}
       <Notice kind="info" className="mb-4">
         Copy the token now. It is shown this once and cannot be retrieved later; rotate the token if it is lost.
       </Notice>
@@ -218,6 +238,7 @@ function CreatedTokenPanel({ created, title, actions }: { created: CreatedToken;
 
 export function NewTokenPage() {
   const [created, setCreated] = useState<CreatedToken | null>(null);
+  const [policyError, setPolicyError] = useState<string | null>(null);
   if (created) {
     return (
       <>
@@ -225,6 +246,7 @@ export function NewTokenPage() {
         <CreatedTokenPanel
           created={created}
           title={`Token "${created.name}" created`}
+          warning={policyError ? `The token was created without its policies: ${policyError}. Attach them with Edit on the tokens page.` : null}
           actions={
             <>
               <LinkButton href="/tokens" variant="primary">
@@ -243,8 +265,18 @@ export function NewTokenPage() {
       <Panel>
         <TokenForm
           submitLabel="Create token"
-          onSubmit={async (input) => {
-            setCreated(await api.tokens.create(input));
+          onSubmit={async (input, policies) => {
+            const token = await api.tokens.create(input);
+            let failed: string | null = null;
+            if (policies?.length) {
+              try {
+                await api.tokens.setPolicies(token.id, policies);
+              } catch (e) {
+                failed = errorMessage(e);
+              }
+            }
+            setPolicyError(failed);
+            setCreated(token);
           }}
         />
       </Panel>
@@ -289,8 +321,9 @@ export function EditTokenPage({ id }: { id: number }) {
         <TokenForm
           initial={token}
           submitLabel="Save changes"
-          onSubmit={async (input) => {
+          onSubmit={async (input, policies) => {
             await api.tokens.update(id, input);
+            if (policies) await api.tokens.setPolicies(id, policies);
             navigate("/tokens");
           }}
         />

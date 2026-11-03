@@ -1,7 +1,8 @@
 import { useState } from "react";
-import { api, type Token, type TokenInput } from "../api.ts";
+import { api, type Token, type TokenInput, type TokenPolicy, type TokenPolicyInput } from "../api.ts";
 import { fromLocalInput, isOrigin, toLocalInput } from "../format.ts";
 import { useAction, useLoad } from "../hooks.ts";
+import { TokenPoliciesEditor } from "../token-policies.tsx";
 import { Button, Checkbox, Field, Fieldset, Input, Notice, Radio, Textarea } from "../ui.tsx";
 
 type OriginMode = "none" | "any" | "list";
@@ -47,14 +48,23 @@ const EMPTY: FormState = { name: "", allScopes: true, scopes: [], originMode: "n
 interface Props {
   initial?: Token;
   submitLabel: string;
-  onSubmit: (input: TokenInput) => Promise<void>;
+  /** `policies` is the ordered attachment list, or null when it did not change. */
+  onSubmit: (input: TokenInput, policies: TokenPolicyInput[] | null) => Promise<void>;
+}
+
+function attachments(list: TokenPolicy[]): TokenPolicyInput[] {
+  return list.map((p) => ({ policy_id: p.policy_id, enabled: p.enabled }));
 }
 
 export default function TokenForm({ initial, submitLabel, onSubmit }: Props) {
   const [form, setForm] = useState<FormState>(() => (initial ? fromToken(initial) : EMPTY));
   const [errors, setErrors] = useState<Errors>({});
+  const [policies, setPolicies] = useState<TokenPolicy[]>(() => initial?.policies ?? []);
   const upstreams = useLoad("upstreams", api.upstreams.list);
+  const allPolicies = useLoad("policies", api.policies.list);
   const action = useAction(onSubmit);
+  // Revoked tokens cannot hold policies.
+  const showPolicies = !initial?.revoked_at;
 
   const update = (patch: Partial<FormState>): void => setForm((f) => ({ ...f, ...patch }));
   const toggleScope = (slug: string, on: boolean): void =>
@@ -82,7 +92,9 @@ export default function TokenForm({ initial, submitLabel, onSubmit }: Props) {
       document.getElementById(FIELD_IDS[firstInvalid])?.focus();
       return;
     }
-    void action.run({ name, scopes: form.allScopes ? ["*"] : form.scopes, origins, expires_at });
+    const next = attachments(policies);
+    const policiesChanged = showPolicies && JSON.stringify(next) !== JSON.stringify(attachments(initial?.policies ?? []));
+    void action.run({ name, scopes: form.allScopes ? ["*"] : form.scopes, origins, expires_at }, policiesChanged ? next : null);
   };
 
   // Slugs the token already names that no longer exist as upstreams stay selectable so editing does not silently drop them.
@@ -164,6 +176,8 @@ export default function TokenForm({ initial, submitLabel, onSubmit }: Props) {
           ) : null}
         </div>
       </Field>
+
+      {showPolicies ? <TokenPoliciesEditor value={policies} onChange={setPolicies} policies={allPolicies.data} loadError={allPolicies.error} /> : null}
 
       {action.error ? <Notice kind="error">{action.error}</Notice> : null}
       <div>
