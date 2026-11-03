@@ -24,6 +24,7 @@ the same service; path routing (`<host>/exa/...`) works with the bare host.
 | `KEYGATE_LOG_RETENTION_DAYS` | `30` | `0` keeps every request log row |
 | `KEYGATE_SESSION_DAYS` | `14` | |
 | `KEYGATE_UPSTREAM_TIMEOUT_MS` | `300000` | Includes streamed bodies |
+| `KEYGATE_TRUSTED_PROXY_HOPS` | `0` | Proxies in front of keygate that append to `X-Forwarded-For`; policies see the client IP that many entries from the right. `0` uses the socket address |
 
 ## Use
 
@@ -58,8 +59,59 @@ its scope with links to their llms.txt.
 - Token: `kg_...`, scoped to upstreams, with optional browser origins and
   expiry. Shown once; rotate replaces the value and keeps the scopes.
 
-Responses stream through unchanged. Header, query and cookie placements forward
-the body byte for byte; `json` and `form` placements re-serialize it.
+Responses stream through unchanged unless a policy edits them. Header, query
+and cookie placements forward the body byte for byte; `json` and `form`
+placements re-serialize it.
+
+## Policies
+
+A policy is a TypeScript module attached to tokens. It runs on each request of
+those tokens after the token, scope and origin checks and before the
+credential is added, inside a QuickJS sandbox with no access to credentials,
+the network, files or the environment.
+
+```ts
+export const meta = { name: "no-big-models", needs: ["body"] };
+
+export function onRequest(req, ctx) {
+  if (ctx.bodySkipped) return deny(400, "The request body could not be checked");
+  if (match(req.body?.model, ["gpt-5*", "o3-pro"])) return deny(403, "Model not allowed");
+  req.headers["x-client"] = ctx.token.name;
+}
+
+export function onResponse(res) {
+  delete res.headers["x-request-id"];
+}
+```
+
+- `meta.name` (lowercase letters, digits, dashes) is unique and names the
+  policy. `meta.needs` may list `"body"` and `"responseBody"`.
+- `onRequest(req, ctx)` gets `{ method, path, query, headers, body }`;
+  `onResponse(res, ctx)` gets `{ status, headers, body }`. Hooks edit them in
+  place and are synchronous. `ctx` has the token, the upstream, `origin`, `ip`
+  and `bodySkipped`. `req.path` is the undecoded wire path after the slug.
+- Return nothing to continue, `deny(status?, message?)` (400-499, default 403),
+  or `respond(status, headers?, body?)` to answer instead of the provider.
+- `match(value, pattern)` takes a string (exact, or a glob with `*` and `?`), a
+  RegExp, or an array of either. `replaceDeep(value, pattern, replacement)`
+  returns a copy with every string leaf replaced.
+- `onRequest` runs in the token's attachment order, `onResponse` in reverse on
+  every provider response. The first deny or respond stops the chain.
+- The request body is parsed only when a policy needs `body`, the type is JSON
+  or urlencoded form, and `Content-Length` is at most 1 MB. Otherwise
+  `req.body` is `undefined`, `ctx.bodySkipped` says why, and the body is
+  forwarded as sent. Response bodies follow the same rule with `responseBody`
+  and JSON; streams pass through untouched.
+- Each hook call gets 50 ms and each policy 16 MB. Module-level variables may
+  persist between calls or reset at any time.
+- A save applies to the next request. Disabled policies and switched-off
+  attachments are skipped.
+
+Clients see a deny as `{"error":"policy_denied","policy":"<name>","message":"..."}`
+with the deny status, and `respond()` as the response the policy built. A
+throw, timeout, memory overrun or invalid result fails closed with `500
+{"error":"policy_error","policy":"<name>","message":"..."}`. The request log
+records the policy name on these rows.
 
 ## Admin API
 
