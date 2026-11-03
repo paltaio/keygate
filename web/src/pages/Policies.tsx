@@ -281,6 +281,9 @@ export function PolicyPage({ id }: { id: number }) {
         }
         actions={
           <>
+            <LinkButton href={`/requests?policy=${p.name}`} variant="quiet">
+              Requests
+            </LinkButton>
             <Button onClick={() => void toggle.run(p)} busy={toggle.busy}>
               {p.enabled ? "Disable policy" : "Enable policy"}
             </Button>

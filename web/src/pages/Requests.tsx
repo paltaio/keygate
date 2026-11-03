@@ -3,10 +3,10 @@ import { useLocation, useSearch } from "wouter";
 import { api, REQUEST_STATUSES, type RequestFilter, type RequestRow, type RequestStatus } from "../api.ts";
 import { REQUEST_STATUS_LABEL, formatBytes, formatDateTime, formatMs, requestKind } from "../format.ts";
 import { useAction, useLoad } from "../hooks.ts";
-import { Button, LoadError, Mono, Notice, PageHeader, Panel, Select, TableMessage } from "../ui.tsx";
+import { Button, LoadError, Mono, Notice, PageHeader, Panel, Select, TableMessage, TextLink } from "../ui.tsx";
 
 const PAGE = 100;
-const COLUMNS = 11;
+const COLUMNS = 12;
 
 function parseFilter(search: string): RequestFilter {
   const params = new URLSearchParams(search);
@@ -17,6 +17,8 @@ function parseFilter(search: string): RequestFilter {
   if (Number.isInteger(token) && token > 0) filter.token_id = token;
   const status = params.get("status");
   if (status && (REQUEST_STATUSES as readonly string[]).includes(status)) filter.status = status as RequestStatus;
+  const policy = params.get("policy");
+  if (policy) filter.policy = policy;
   return filter;
 }
 
@@ -25,14 +27,30 @@ function toSearch(filter: RequestFilter): string {
   if (filter.upstream_id) params.set("upstream_id", String(filter.upstream_id));
   if (filter.token_id) params.set("token_id", String(filter.token_id));
   if (filter.status) params.set("status", filter.status);
+  if (filter.policy) params.set("policy", filter.policy);
   const qs = params.toString();
   return qs ? `?${qs}` : "";
 }
 
+/** Status color; a response a policy built is colored by its own status code. */
+function statusTone(row: RequestRow): string {
+  const kind = requestKind(row.error === "policy_response" ? { ...row, error: null } : row);
+  return kind === "ok" ? "text-status-ok" : kind === "client_error" ? "text-content-default" : "text-status-critical";
+}
+
 function StatusCell({ row }: { row: RequestRow }) {
-  const kind = requestKind(row);
-  const tone = kind === "ok" ? "text-status-ok" : kind === "client_error" ? "text-content-default" : "text-status-critical";
+  const tone = statusTone(row);
   return <span className={`num font-medium ${tone}`}>{row.status ?? "-"}</span>;
+}
+
+function PolicyCell({ name, id }: { name: string | null; id: number | undefined }) {
+  if (name === null) return <span className="text-content-muted">-</span>;
+  if (id === undefined) return <Mono className="whitespace-nowrap">{name}</Mono>;
+  return (
+    <TextLink href={`/policies/${id}`} className="font-mono text-[13px] whitespace-nowrap">
+      {name}
+    </TextLink>
+  );
 }
 
 export default function Requests() {
@@ -44,6 +62,7 @@ export default function Requests() {
 
   const upstreams = useLoad("upstreams", api.upstreams.list);
   const tokens = useLoad("tokens", api.tokens.list);
+  const policies = useLoad("policies", api.policies.list);
   const first = useLoad(`requests${filterKey}`, () => api.requests({ ...filter, limit: PAGE }));
   const [extra, setExtra] = useState<{ key: string; rows: RequestRow[]; exhausted: boolean }>({ key: filterKey, rows: [], exhausted: false });
   const more = extra.key === filterKey ? extra : { key: filterKey, rows: [], exhausted: false };
@@ -57,11 +76,12 @@ export default function Requests() {
     setExtra({ key: filterKey, rows: [...more.rows, ...page], exhausted: page.length < PAGE });
   });
 
-  const setFilter = (key: "upstream_id" | "token_id" | "status", raw: string): void => {
+  const setFilter = (key: "upstream_id" | "token_id" | "status" | "policy", raw: string): void => {
     const next: RequestFilter = { ...filter };
     delete next[key];
     if (raw) {
       if (key === "status") next.status = raw as RequestStatus;
+      else if (key === "policy") next.policy = raw;
       else next[key] = Number(raw);
     }
     navigate(`/requests${toSearch(next)}`, { replace: true });
@@ -69,6 +89,9 @@ export default function Requests() {
 
   const upstreamName = new Map(upstreams.data?.map((u) => [u.id, u.slug]) ?? []);
   const tokenName = new Map(tokens.data?.map((t) => [t.id, t.name]) ?? []);
+  const policyId = new Map(policies.data?.map((p) => [p.name, p.id]) ?? []);
+  // A filtered name that no longer exists stays selectable.
+  const policyNames = [...new Set([...policyId.keys(), ...(filter.policy ? [filter.policy] : [])])];
   const refresh = (): void => {
     setExtra({ key: filterKey, rows: [], exhausted: false });
     first.reload();
@@ -120,6 +143,17 @@ export default function Requests() {
             ))}
           </Select>
         </label>
+        <label className="flex items-center gap-2 text-sm">
+          <span className="text-content-muted">Policy</span>
+          <Select className="w-auto min-w-40" value={filter.policy ?? ""} onChange={(e) => setFilter("policy", e.target.value)}>
+            <option value="">All</option>
+            {policyNames.map((name) => (
+              <option key={name} value={name}>
+                {name}
+              </option>
+            ))}
+          </Select>
+        </label>
         {active ? (
           <Button variant="quiet" onClick={() => navigate("/requests", { replace: true })}>
             Clear filters
@@ -128,7 +162,7 @@ export default function Requests() {
       </div>
       {first.error ? <LoadError message={first.error} onRetry={first.reload} /> : null}
       <Panel bleed>
-        <table className="tbl min-w-[64rem]">
+        <table className="tbl min-w-[70rem]">
           <thead>
             <tr>
               <th>Time</th>
@@ -141,6 +175,7 @@ export default function Requests() {
               <th className="num">In</th>
               <th className="num">Out</th>
               <th>Error</th>
+              <th>Policy</th>
               <th>Origin</th>
             </tr>
           </thead>
@@ -177,7 +212,10 @@ export default function Requests() {
                   <td className="num">{formatMs(r.latency_ms)}</td>
                   <td className="num">{formatBytes(r.bytes_in)}</td>
                   <td className="num">{formatBytes(r.bytes_out)}</td>
-                  <td>{r.error ? <Mono className="text-status-critical">{r.error}</Mono> : <span className="text-content-muted">-</span>}</td>
+                  <td>{r.error ? <Mono className={r.error === "policy_response" ? "text-content-muted" : "text-status-critical"}>{r.error}</Mono> : <span className="text-content-muted">-</span>}</td>
+                  <td>
+                    <PolicyCell name={r.policy} id={r.policy === null ? undefined : policyId.get(r.policy)} />
+                  </td>
                   <td>
                     {r.origin ? (
                       <Mono className="block max-w-[24ch] truncate" title={r.origin}>

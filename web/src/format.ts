@@ -161,7 +161,7 @@ export const REQUEST_STATUS_LABEL: Record<RequestStatus, string> = {
   ok: "OK",
   client_error: "Client error (4xx)",
   upstream_error: "Upstream error (5xx)",
-  proxy_error: "Rejected by keygate",
+  proxy_error: "Stopped by keygate or a policy",
 };
 
 export function errorMessage(e: unknown): string {
