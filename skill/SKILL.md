@@ -112,7 +112,9 @@ synchronous; returning a Promise is an error.
 `req` is `{ method, path, query, headers, body }` and `res` is `{ status,
 headers, body }`, with lower-case header names. Edit them in place: headers,
 query keys, `body`, `req.path` (stays under the upstream's base URL) and
-`res.status`. Return nothing to continue, `deny(status?, message?)` (400-499,
+`res.status`. Policies cannot set `content-length`, `host`, hop-by-hop or
+forwarding headers, or a response's `set-cookie`; `onResponse` does not see
+`set-cookie`. Return nothing to continue, `deny(status?, message?)` (400-499,
 default 403) to refuse, or `respond(status, headers?, body?)` to answer
 instead of the provider; either stops the chain. `ctx` is `{ token: { id,
 name, scopes }, upstream: { slug, name, base_url }, origin, ip, method,
@@ -130,8 +132,11 @@ provider response including errors. `req.body` is the parsed JSON or form
 fields only when `needs` has `body`, the type is JSON or urlencoded form and
 the body is at most 1 MB; otherwise it is `undefined` and `ctx.bodySkipped` is
 `not_requested`, `unparsed` or `too_large`, and the body is forwarded as sent.
-`res.body` needs `responseBody` and a JSON response of at most 1 MB; other
-types, SSE included, stream through untouched. `req.query` and form bodies
+A JSON body that fails to parse is refused with `400 invalid_body` when a
+policy needs the body. `res.body` needs `responseBody` and a JSON response of
+at most 1 MB as read; larger bodies, other types and SSE stream through
+untouched. A `responseBody` policy holds a JSON response until it is complete
+(up to 1 MB) before the client gets it. `req.query` and form bodies
 hold the first value of a repeated key; when an `onRequest` hook runs, the
 provider gets only that first pair.
 

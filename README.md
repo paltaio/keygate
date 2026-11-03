@@ -41,7 +41,7 @@ an `Origin` that is on the token's origin list.
 
 `GET /<slug>/llms.txt` needs no token. It lists the base URL and the token
 slots for that upstream, followed by the upstream's docs field (markdown, set
-in the dashboard). Notes stay private. `GET /llms.txt` on the bare host
+per upstream). Notes stay private. `GET /llms.txt` on the bare host
 explains the token and, when the request carries one, lists the upstreams in
 its scope with links to their llms.txt.
 
@@ -88,20 +88,25 @@ export function onResponse(res) {
   policy. `meta.needs` may list `"body"` and `"responseBody"`.
 - `onRequest(req, ctx)` gets `{ method, path, query, headers, body }`;
   `onResponse(res, ctx)` gets `{ status, headers, body }`. Hooks edit them in
-  place and are synchronous. `ctx` has the token, the upstream, `origin`, `ip`
-  and `bodySkipped`. `req.path` is the undecoded wire path after the slug.
+  place and are synchronous. `ctx` has the token, the upstream, `origin`, `ip`,
+  `method` and `bodySkipped`. `req.path` is the undecoded wire path after the
+  slug.
 - Return nothing to continue, `deny(status?, message?)` (400-499, default 403),
   or `respond(status, headers?, body?)` to answer instead of the provider.
 - `match(value, pattern)` takes a string (exact, or a glob with `*` and `?`), a
   RegExp, or an array of either. `replaceDeep(value, pattern, replacement)`
-  returns a copy with every string leaf replaced.
+  returns a copy with every match in every string leaf replaced; a string
+  pattern is literal.
 - `onRequest` runs in the token's attachment order, `onResponse` in reverse on
   every provider response. The first deny or respond stops the chain.
 - The request body is parsed only when a policy needs `body`, the type is JSON
   or urlencoded form, and the body is at most 1 MB. Otherwise `req.body` is
   `undefined`, `ctx.bodySkipped` says why, and the body is forwarded as sent.
-  Response bodies follow the same rule with `responseBody` and JSON; other
-  types, SSE included, stream through untouched.
+  A JSON body that fails to parse is refused with `400 invalid_body` when a
+  policy needs the body. Response bodies follow the same rule with
+  `responseBody` and JSON; other types, SSE included, stream through
+  untouched. A `responseBody` policy holds a JSON response until it is
+  complete (up to 1 MB) before the client gets it.
 - `req.query` and form bodies hold the first value of a repeated key. When an
   `onRequest` hook runs, the provider gets only that first pair of each key.
 - Each hook call gets 50 ms and each policy 16 MB. Module-level variables may
