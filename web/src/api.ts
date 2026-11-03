@@ -82,6 +82,18 @@ export interface TokenInput {
   expires_at: string | null;
 }
 
+/** One entry of a token's ordered policy list; `enabled` is the attachment's own switch. */
+export interface TokenPolicy {
+  policy_id: number;
+  name: string;
+  enabled: boolean;
+}
+
+export interface TokenPolicyInput {
+  policy_id: number;
+  enabled: boolean;
+}
+
 export interface Token extends TokenInput {
   id: number;
   hint: string;
@@ -91,10 +103,34 @@ export interface Token extends TokenInput {
   created_at: string;
   last_used_at: string | null;
   rotated_at: string | null;
+  policies: TokenPolicy[];
 }
 
 export interface CreatedToken extends Token {
   token: string;
+}
+
+export type PolicyNeed = "body" | "responseBody";
+
+export interface Policy {
+  id: number;
+  name: string;
+  needs: PolicyNeed[];
+  enabled: boolean;
+  /** Tokens the policy is attached to, enabled or not. */
+  token_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TokenRef {
+  id: number;
+  name: string;
+}
+
+export interface PolicyDetail extends Policy {
+  source: string;
+  tokens: TokenRef[];
 }
 
 export interface ApiKey {
@@ -125,6 +161,8 @@ export interface RequestRow {
   bytes_out: number | null;
   origin: string | null;
   error: string | null;
+  /** Name of the policy that denied, answered, or failed the request. */
+  policy: string | null;
 }
 
 export const REQUEST_STATUSES = ["ok", "client_error", "upstream_error", "proxy_error"] as const;
@@ -133,6 +171,8 @@ export type RequestStatus = (typeof REQUEST_STATUSES)[number];
 export interface RequestFilter {
   token_id?: number;
   upstream_id?: number;
+  /** Exact policy name. */
+  policy?: string;
   status?: RequestStatus;
   before?: number;
   limit?: number;
@@ -141,12 +181,15 @@ export interface RequestFilter {
 export class ApiError extends Error {
   status: number;
   code: string;
+  /** The parsed error body, e.g. `tokens` on policy_in_use or `policy_ids` on unknown_policy. */
+  body: Record<string, unknown>;
 
-  constructor(status: number, code: string, message: string) {
+  constructor(status: number, code: string, message: string, body: Record<string, unknown> = {}) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.code = code;
+    this.body = body;
   }
 }
 
@@ -175,15 +218,17 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   if (res.ok) return (await res.json()) as T;
   let code = "request_failed";
   let message = `The server answered with status ${res.status}`;
+  let data: Record<string, unknown> = {};
   try {
-    const data = (await res.json()) as { error?: unknown; message?: unknown };
+    const parsed: unknown = await res.json();
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) data = { ...parsed };
     if (typeof data.error === "string") code = data.error;
     if (typeof data.message === "string") message = data.message;
   } catch {
     // Non-JSON error body; keep the status message.
   }
   if (res.status === 401 && code === "unauthenticated") for (const fn of sessionListeners) fn();
-  throw new ApiError(res.status, code, message);
+  throw new ApiError(res.status, code, message, data);
 }
 
 function query(filter: RequestFilter): string {
@@ -219,6 +264,14 @@ export const api = {
     setEnabled: (id: number, enabled: boolean) => request<Token>("PATCH", `/tokens/${id}/enabled`, { enabled }),
     rotate: (id: number) => request<CreatedToken>("POST", `/tokens/${id}/rotate`),
     revoke: (id: number) => request<{ ok: true }>("DELETE", `/tokens/${id}`),
+    setPolicies: (id: number, policies: TokenPolicyInput[]) => request<TokenPolicy[]>("PUT", `/tokens/${id}/policies`, { policies }),
+  },
+  policies: {
+    list: () => request<Policy[]>("GET", "/policies"),
+    get: (id: number) => request<PolicyDetail>("GET", `/policies/${id}`),
+    create: (source: string) => request<PolicyDetail>("POST", "/policies", { source }),
+    update: (id: number, patch: { source?: string; enabled?: boolean }) => request<PolicyDetail>("PATCH", `/policies/${id}`, patch),
+    remove: (id: number) => request<{ ok: true }>("DELETE", `/policies/${id}`),
   },
   requests: (filter: RequestFilter) => request<RequestRow[]>("GET", `/requests${query(filter)}`),
   apiKeys: {

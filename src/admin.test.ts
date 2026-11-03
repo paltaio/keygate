@@ -2,9 +2,10 @@ import { beforeAll, describe, expect, test } from "bun:test";
 import { Hono } from "hono";
 import { adminRoutes } from "./admin.ts";
 import { loadEnv } from "./env.ts";
+import { createProxy } from "./proxy.ts";
 import { Store } from "./store.ts";
 
-const env = loadEnv({ KEYGATE_DATA_DIR: ":memory:" });
+const env = loadEnv({ KEYGATE_HOST: "keygate.test", KEYGATE_DATA_DIR: ":memory:" });
 
 describe("admin API keys", () => {
   const store = new Store(":memory:");
@@ -93,5 +94,199 @@ describe("admin API keys", () => {
     expect((await app.request(`/api/api-keys/${id}`, { method: "DELETE", headers: { cookie } })).status).toBe(200);
     expect((await app.request("/api/upstreams", { headers: { authorization: `Bearer ${apiKey}` } })).status).toBe(401);
     expect((await app.request(`/api/api-keys/${id}/rotate`, { method: "POST", headers: { cookie } })).status).toBe(404);
+  });
+});
+
+interface PolicyBody {
+  id: number;
+  name: string;
+  needs: string[];
+  enabled: boolean;
+  token_count: number;
+  source: string;
+  tokens: Array<{ id: number; name: string }>;
+}
+
+interface TokenBody {
+  id: number;
+  policies: Array<{ policy_id: number; name: string; enabled: boolean }>;
+}
+
+function gate(name: string, message: string, needs = ""): string {
+  return `export const meta = { name: ${JSON.stringify(name)}${needs} };
+export function onRequest(req: { headers: Record<string, string> }) {
+  if (req.headers["x-block"] === "1") return deny(403, ${JSON.stringify(message)});
+}`;
+}
+
+function noop(name: string): string {
+  return `export const meta = { name: ${JSON.stringify(name)} };
+export function onRequest() {}`;
+}
+
+describe("admin policies", () => {
+  const store = new Store(":memory:");
+  const app = new Hono().route("/api", adminRoutes(store, env));
+  const upstreamCalls: string[] = [];
+  const proxy = createProxy({
+    store,
+    env,
+    fetch: async (url) => {
+      upstreamCalls.push(url);
+      return new Response("ok");
+    },
+  });
+  let auth: Record<string, string> = {};
+  let tokenId = 0;
+  let tokenValue = "";
+  let userId = 0;
+
+  beforeAll(() => {
+    userId = store.createUser("admin@test.local", "A", "x");
+    auth = { authorization: `Bearer ${store.createApiKey("agent", userId).key}`, "content-type": "application/json" };
+    const upstreamId = store.createUpstream({ slug: "up", name: "Up", base_url: "https://up.example", placements: [{ type: "header", name: "x-api-key", value: "{{key}}" }], strategy: "active", notes: "", docs: "" });
+    store.addKey(upstreamId, "k", { key: "REAL" }, true, userId);
+    const created = store.createToken({ name: "t1", scopes: ["up"], origins: [], expires_at: null }, userId);
+    tokenId = created.id;
+    tokenValue = created.token;
+  });
+
+  const call = (method: string, path: string, body?: unknown) =>
+    app.request(`/api${path}`, { method, headers: auth, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+  const blocked = () => proxy(new Request("http://keygate.test/up/x", { headers: { "x-api-key": tokenValue, "x-block": "1" } }));
+
+  async function create(source: string): Promise<PolicyBody> {
+    const res = await call("POST", "/policies", { source });
+    expect(res.status).toBe(201);
+    return (await res.json()) as PolicyBody;
+  }
+
+  test("an API key creates a policy as its creator", async () => {
+    const policy = await create(gate("gate", "v1", `, needs: ["body"]`));
+    expect(policy).toMatchObject({ name: "gate", needs: ["body"], enabled: true, token_count: 0, tokens: [] });
+    expect(policy.source).toContain("v1");
+    expect(store.policyById(policy.id)?.created_by).toBe(userId);
+    const list = (await (await call("GET", "/policies")).json()) as Array<Record<string, unknown>>;
+    expect(list).toHaveLength(1);
+    expect(list[0]).toMatchObject({ id: policy.id, name: "gate", needs: ["body"], enabled: true, token_count: 0 });
+    expect(list[0]?.source).toBeUndefined();
+    expect(list[0]?.compiled).toBeUndefined();
+  });
+
+  test("a source that does not compile is refused with the message", async () => {
+    const syntax = await call("POST", "/policies", { source: "export const meta = {" });
+    expect(syntax.status).toBe(400);
+    expect(((await syntax.json()) as { error: string }).error).toBe("compile_error");
+    const noHooks = await call("POST", "/policies", { source: `export const meta = { name: "x" };` });
+    expect(await noHooks.json()).toEqual({ error: "compile_error", message: "the module must export an onRequest or onResponse function" });
+    expect((await call("POST", "/policies", { source: 42 })).status).toBe(400);
+    const huge = await call("POST", "/policies", { source: "x".repeat(200 * 1024) });
+    expect(huge.status).toBe(400);
+    expect(((await huge.json()) as { message: string }).message).toBe("source: source exceeds 100 KB");
+    expect(store.policies()).toHaveLength(1);
+  });
+
+  test("a name in use is refused on create and on rename", async () => {
+    const taken = await call("POST", "/policies", { source: gate("gate", "dup") });
+    expect(taken.status).toBe(409);
+    expect(((await taken.json()) as { error: string }).error).toBe("name_taken");
+    const other = await create(noop("other"));
+    const rename = await call("PATCH", `/policies/${other.id}`, { source: noop("gate") });
+    expect(rename.status).toBe(409);
+    expect(((await rename.json()) as { error: string }).error).toBe("name_taken");
+    const renamed = await call("PATCH", `/policies/${other.id}`, { source: noop("other-2") });
+    expect(((await renamed.json()) as PolicyBody).name).toBe("other-2");
+    expect((await call("PATCH", "/policies/999", { enabled: false })).status).toBe(404);
+    expect((await call("GET", "/policies/999")).status).toBe(404);
+  });
+
+  test("attachments replace the token's list in order and show on token views", async () => {
+    const [gatePolicy, other] = store.policies().sort((a, b) => a.id - b.id);
+    if (!gatePolicy || !other) throw new Error("missing policies");
+    const put = await call("PUT", `/tokens/${tokenId}/policies`, { policies: [{ policy_id: other.id, enabled: false }, { policy_id: gatePolicy.id, enabled: true }] });
+    expect(put.status).toBe(200);
+    expect(await put.json()).toEqual([
+      { policy_id: other.id, name: "other-2", enabled: false },
+      { policy_id: gatePolicy.id, name: "gate", enabled: true },
+    ]);
+    const tokens = (await (await call("GET", "/tokens")).json()) as TokenBody[];
+    expect(tokens[0]?.policies.map((p) => p.name)).toEqual(["other-2", "gate"]);
+
+    await call("PUT", `/tokens/${tokenId}/policies`, { policies: [{ policy_id: gatePolicy.id, enabled: true }, { policy_id: other.id, enabled: true }] });
+    const patched = (await (await call("PATCH", `/tokens/${tokenId}`, { name: "t1", scopes: ["up"] })).json()) as TokenBody;
+    expect(patched.policies).toEqual([
+      { policy_id: gatePolicy.id, name: "gate", enabled: true },
+      { policy_id: other.id, name: "other-2", enabled: true },
+    ]);
+    const detail = (await (await call("GET", `/policies/${gatePolicy.id}`)).json()) as PolicyBody;
+    expect(detail.token_count).toBe(1);
+    expect(detail.tokens).toEqual([{ id: tokenId, name: "t1" }]);
+
+    const created = (await (await call("POST", "/tokens", { name: "t2", scopes: ["up"] })).json()) as TokenBody;
+    expect(created.policies).toEqual([]);
+  });
+
+  test("unknown or repeated policy ids are refused with the ids", async () => {
+    const id = store.policies()[0]?.id ?? 0;
+    const unknown = await call("PUT", `/tokens/${tokenId}/policies`, { policies: [{ policy_id: id, enabled: true }, { policy_id: 999, enabled: true }] });
+    expect(unknown.status).toBe(400);
+    expect(await unknown.json()).toMatchObject({ error: "unknown_policy", policy_ids: [999] });
+    const dup = await call("PUT", `/tokens/${tokenId}/policies`, { policies: [{ policy_id: id, enabled: true }, { policy_id: id, enabled: false }] });
+    expect(dup.status).toBe(400);
+    expect(await dup.json()).toMatchObject({ error: "duplicate_policy", policy_ids: [id] });
+    expect(store.tokenPolicies(tokenId)).toHaveLength(2);
+  });
+
+  test("a saved source applies to the next proxied request", async () => {
+    const id = store.policyByName("gate")?.id ?? 0;
+    const first = await blocked();
+    expect(first.status).toBe(403);
+    expect(await first.json()).toEqual({ error: "policy_denied", policy: "gate", message: "v1" });
+    expect((await call("PATCH", `/policies/${id}`, { source: gate("gate", "v2") })).status).toBe(200);
+    expect(((await (await blocked()).json()) as { message: string }).message).toBe("v2");
+    expect(upstreamCalls).toHaveLength(0);
+  });
+
+  test("disabling a policy stops it from running", async () => {
+    const id = store.policyByName("gate")?.id ?? 0;
+    const off = await call("PATCH", `/policies/${id}`, { enabled: false });
+    expect(((await off.json()) as PolicyBody).enabled).toBe(false);
+    const passed = await blocked();
+    expect(passed.status).toBe(200);
+    expect(await passed.text()).toBe("ok");
+    expect(upstreamCalls).toHaveLength(1);
+    await call("PATCH", `/policies/${id}`, { enabled: true });
+    expect((await blocked()).status).toBe(403);
+  });
+
+  test("the request log filters by policy name", async () => {
+    const rows = (await (await call("GET", "/requests?policy=gate")).json()) as Array<{ policy: string | null; error: string | null }>;
+    expect(rows).toHaveLength(3);
+    expect(rows.every((r) => r.policy === "gate" && r.error === "policy_denied")).toBe(true);
+    expect(await (await call("GET", "/requests?policy=other-2")).json()).toEqual([]);
+    const all = (await (await call("GET", "/requests")).json()) as Array<{ policy: string | null }>;
+    expect(all.some((r) => r.policy === null)).toBe(true);
+  });
+
+  test("a policy cannot be deleted while attached", async () => {
+    const id = store.policyByName("gate")?.id ?? 0;
+    const refused = await call("DELETE", `/policies/${id}`);
+    expect(refused.status).toBe(409);
+    expect(await refused.json()).toMatchObject({ error: "policy_in_use", tokens: [{ id: tokenId, name: "t1" }] });
+    const other = store.policyByName("other-2")?.id ?? 0;
+    expect((await call("PUT", `/tokens/${tokenId}/policies`, { policies: [{ policy_id: other, enabled: true }] })).status).toBe(200);
+    expect((await call("DELETE", `/policies/${id}`)).status).toBe(200);
+    expect((await call("DELETE", `/policies/${id}`)).status).toBe(404);
+    expect(store.policyById(id)).toBeNull();
+  });
+
+  test("a revoked token takes no attachments", async () => {
+    const other = store.policyByName("other-2")?.id ?? 0;
+    expect((await call("DELETE", `/tokens/${tokenId}`)).status).toBe(200);
+    const res = await call("PUT", `/tokens/${tokenId}/policies`, { policies: [{ policy_id: other, enabled: true }] });
+    expect(res.status).toBe(404);
+    expect(((await res.json()) as { message: string }).message).toBe("No such token, or it is revoked");
+    expect((await call("PUT", "/tokens/999/policies", { policies: [] })).status).toBe(404);
+    expect((await call("DELETE", `/policies/${other}`)).status).toBe(200);
   });
 });

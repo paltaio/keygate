@@ -3,7 +3,26 @@ import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { allowLoginAttempt, clearLoginAttempts, clientIp, endSession, requireSession, requireUser, startSession, type AuthVariables } from "./auth.ts";
 import type { Env } from "./env.ts";
-import { PLACEMENT_TYPES, RESERVED_SLUGS, STRATEGIES, missingSecrets, parseList, parsePlacements, parseSecrets, placeholderNames, secretHint, type Placement, type ProviderKey, type Store, type Token, type Upstream } from "./store.ts";
+import { MAX_SOURCE_BYTES, compilePolicy, type CompiledPolicy, type PolicyNeed } from "./policy.ts";
+import {
+  PLACEMENT_TYPES,
+  RESERVED_SLUGS,
+  STRATEGIES,
+  missingSecrets,
+  parseList,
+  parseNeeds,
+  parsePlacements,
+  parseSecrets,
+  placeholderNames,
+  secretHint,
+  type Placement,
+  type PolicySummary,
+  type ProviderKey,
+  type Store,
+  type Token,
+  type TokenRef,
+  type Upstream,
+} from "./store.ts";
 
 const slug = z
   .string()
@@ -28,6 +47,8 @@ const placement = z.object({
   name: z.string().min(1).max(200),
   value: z.string().min(1).max(4000),
 });
+
+const policySource = z.string().max(MAX_SOURCE_BYTES, `source exceeds ${MAX_SOURCE_BYTES / 1024} KB`);
 
 const schemas = {
   login: z.object({ email: z.email(), password: z.string().min(1) }),
@@ -60,17 +81,23 @@ const schemas = {
     origins: z.array(origin).default([]),
     expires_at: isoDate.nullable().default(null),
   }),
+  policy: z.object({ source: policySource }),
+  policyPatch: z.object({ source: policySource.optional(), enabled: z.boolean().optional() }),
+  tokenPolicies: z.object({
+    policies: z.array(z.object({ policy_id: z.number().int().positive(), enabled: z.boolean().default(true) })).max(100),
+  }),
   requests: z.object({
     token_id: z.coerce.number().int().positive().optional(),
     upstream_id: z.coerce.number().int().positive().optional(),
+    policy: z.string().min(1).max(63).optional(),
     status: z.enum(["ok", "client_error", "upstream_error", "proxy_error"]).optional(),
     before: z.coerce.number().int().positive().optional(),
     limit: z.coerce.number().int().min(1).max(500).default(100),
   }),
 };
 
-function fail(status: 400 | 404 | 409, code: string, message: string): never {
-  throw new HTTPException(status, { res: Response.json({ error: code, message }, { status }) });
+function fail(status: 400 | 404 | 409, code: string, message: string, extra: Record<string, unknown> = {}): never {
+  throw new HTTPException(status, { res: Response.json({ error: code, message, ...extra }, { status }) });
 }
 
 async function parseBody<T>(c: Context, schema: z.ZodType<T>): Promise<T> {
@@ -101,10 +128,59 @@ export function keyView(key: ProviderKey, placements: Placement[]): Omit<Provide
   };
 }
 
-export function tokenView(token: Token): Omit<Token, "hash" | "scopes" | "origins"> & { scopes: string[]; origins: string[] } {
+interface TokenPolicyView {
+  policy_id: number;
+  name: string;
+  enabled: boolean;
+}
+
+interface TokenView extends Omit<Token, "hash" | "scopes" | "origins"> {
+  scopes: string[];
+  origins: string[];
+  policies: TokenPolicyView[];
+}
+
+function tokenPolicyViews(store: Store, tokenId: number): TokenPolicyView[] {
+  return store.tokenPolicies(tokenId).map((p) => ({ policy_id: p.policy_id, name: p.name, enabled: p.enabled === 1 }));
+}
+
+export function tokenView(store: Store, token: Token): TokenView {
   const { hash, scopes, origins, ...rest } = token;
   void hash;
-  return { ...rest, scopes: parseList(scopes), origins: parseList(origins) };
+  return { ...rest, scopes: parseList(scopes), origins: parseList(origins), policies: tokenPolicyViews(store, token.id) };
+}
+
+interface PolicyView {
+  id: number;
+  name: string;
+  needs: PolicyNeed[];
+  enabled: boolean;
+  token_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+function policyView(p: PolicySummary): PolicyView {
+  return { id: p.id, name: p.name, needs: parseNeeds(p.needs), enabled: p.enabled === 1, token_count: p.token_count, created_at: p.created_at, updated_at: p.updated_at };
+}
+
+function policyDetail(store: Store, id: number): PolicyView & { source: string; tokens: TokenRef[] } {
+  const policy = store.policyById(id);
+  if (!policy) fail(404, "not_found", "No such policy");
+  const tokens = store.policyTokens(id);
+  return { ...policyView({ ...policy, token_count: tokens.length }), source: policy.source, tokens };
+}
+
+async function compileSource(source: string): Promise<CompiledPolicy> {
+  const result = await compilePolicy(source);
+  if (!result.ok) fail(400, "compile_error", result.message);
+  return result.policy;
+}
+
+// Call with no await between this and the write, or a concurrent save can take the name in between.
+function claimName(store: Store, name: string, id: number | null): void {
+  const existing = store.policyByName(name);
+  if (existing && existing.id !== id) fail(409, "name_taken", `A policy named ${name} exists`);
 }
 
 interface UpstreamView extends Omit<Upstream, "placements"> {
@@ -307,14 +383,14 @@ export function adminRoutes(store: Store, env: Env): Hono<{ Variables: AuthVaria
     return c.json({ ok: true });
   });
 
-  app.get("/tokens", (c) => c.json(store.tokens().map(tokenView)));
+  app.get("/tokens", (c) => c.json(store.tokens().map((t) => tokenView(store, t))));
 
   app.post("/tokens", async (c) => {
     const input = await parseBody(c, schemas.token);
     const { id, token } = store.createToken(input, c.get("user").id);
     const created = store.tokenById(id);
     if (!created) fail(404, "not_found", "Token vanished after creation");
-    return c.json({ ...tokenView(created), token }, 201);
+    return c.json({ ...tokenView(store, created), token }, 201);
   });
 
   app.patch("/tokens/:id", async (c) => {
@@ -323,7 +399,7 @@ export function adminRoutes(store: Store, env: Env): Hono<{ Variables: AuthVaria
     if (!store.updateToken(id, input)) fail(404, "not_found", "No such token");
     const updated = store.tokenById(id);
     if (!updated) fail(404, "not_found", "No such token");
-    return c.json(tokenView(updated));
+    return c.json(tokenView(store, updated));
   });
 
   app.post("/tokens/:id/rotate", (c) => {
@@ -331,7 +407,7 @@ export function adminRoutes(store: Store, env: Env): Hono<{ Variables: AuthVaria
     const token = store.rotateToken(id);
     const rotated = store.tokenById(id);
     if (!token || !rotated) fail(404, "not_found", "No such token, or it is revoked");
-    return c.json({ ...tokenView(rotated), token });
+    return c.json({ ...tokenView(store, rotated), token });
   });
 
   app.patch("/tokens/:id/enabled", async (c) => {
@@ -340,11 +416,58 @@ export function adminRoutes(store: Store, env: Env): Hono<{ Variables: AuthVaria
     if (!store.setTokenEnabled(id, input.enabled)) fail(404, "not_found", "No such token, or it is revoked");
     const token = store.tokenById(id);
     if (!token) fail(404, "not_found", "No such token");
-    return c.json(tokenView(token));
+    return c.json(tokenView(store, token));
   });
 
   app.delete("/tokens/:id", (c) => {
     if (!store.revokeToken(idParam(c))) fail(404, "not_found", "No such token, or it is already revoked");
+    return c.json({ ok: true });
+  });
+
+  app.put("/tokens/:id/policies", async (c) => {
+    const id = idParam(c);
+    const input = await parseBody(c, schemas.tokenPolicies);
+    const result = store.setTokenPolicies(id, input.policies);
+    if (!result.ok) {
+      if (result.error === "token_not_found") fail(404, "not_found", "No such token, or it is revoked");
+      const message = result.error === "duplicate_policy" ? "Each policy can be attached once" : "No such policy";
+      fail(400, result.error, `${message}: ${result.policy_ids.join(", ")}`, { policy_ids: result.policy_ids });
+    }
+    return c.json(tokenPolicyViews(store, id));
+  });
+
+  app.get("/policies", (c) => c.json(store.policies().map(policyView)));
+
+  app.post("/policies", async (c) => {
+    const input = await parseBody(c, schemas.policy);
+    const compiled = await compileSource(input.source);
+    claimName(store, compiled.name, null);
+    const id = store.createPolicy({ name: compiled.name, source: input.source, compiled: compiled.js, needs: compiled.needs }, c.get("user").id);
+    return c.json(policyDetail(store, id), 201);
+  });
+
+  app.get("/policies/:id", (c) => c.json(policyDetail(store, idParam(c))));
+
+  app.patch("/policies/:id", async (c) => {
+    const id = idParam(c);
+    const input = await parseBody(c, schemas.policyPatch);
+    if (!store.policyById(id)) fail(404, "not_found", "No such policy");
+    if (input.source !== undefined) {
+      const compiled = await compileSource(input.source);
+      claimName(store, compiled.name, id);
+      if (!store.updatePolicy(id, { name: compiled.name, source: input.source, compiled: compiled.js, needs: compiled.needs })) fail(404, "not_found", "No such policy");
+    }
+    if (input.enabled !== undefined) store.setPolicyEnabled(id, input.enabled);
+    return c.json(policyDetail(store, id));
+  });
+
+  app.delete("/policies/:id", (c) => {
+    const result = store.deletePolicy(idParam(c));
+    if (result.status === "not_found") fail(404, "not_found", "No such policy");
+    if (result.status === "in_use") {
+      const names = result.tokens.map((t) => t.name).join(", ");
+      fail(409, "policy_in_use", `Detach the policy from these tokens first: ${names}`, { tokens: result.tokens });
+    }
     return c.json({ ok: true });
   });
 
