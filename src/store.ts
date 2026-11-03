@@ -31,6 +31,8 @@ export interface Upstream {
   /** `active`: the one active credential serves every request. `round_robin`: enabled credentials take turns. */
   strategy: Strategy;
   notes: string;
+  /** Markdown served publicly at /<slug>/llms.txt. */
+  docs: string;
   created_at: string;
   updated_at: string;
 }
@@ -118,6 +120,7 @@ CREATE TABLE IF NOT EXISTS upstreams (
   placements TEXT NOT NULL,
   strategy TEXT NOT NULL DEFAULT 'active',
   notes TEXT NOT NULL DEFAULT '',
+  docs TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -188,6 +191,7 @@ const ADDED_COLUMNS: Array<[table: string, column: string, ddl: string]> = [
   ["tokens", "enabled", "INTEGER NOT NULL DEFAULT 1"],
   ["tokens", "rotated_at", "TEXT"],
   ["api_keys", "rotated_at", "TEXT"],
+  ["upstreams", "docs", "TEXT NOT NULL DEFAULT ''"],
 ];
 
 export const RESERVED_SLUGS = new Set(["admin", "api", "health", "assets", "docs"]);
@@ -224,6 +228,7 @@ export interface UpstreamInput {
   placements: Placement[];
   strategy: Strategy;
   notes: string;
+  docs: string;
 }
 
 export interface TokenInput {
@@ -362,21 +367,21 @@ export class Store {
   createUpstream(input: UpstreamInput): number {
     const ts = now();
     const result = this.db
-      .query<never, [string, string, string, string, string, string, string, string]>(
-        `INSERT INTO upstreams (slug, name, base_url, placements, strategy, notes, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      .query<never, [string, string, string, string, string, string, string, string, string]>(
+        `INSERT INTO upstreams (slug, name, base_url, placements, strategy, notes, docs, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(input.slug, input.name, input.base_url, JSON.stringify(input.placements), input.strategy, input.notes, ts, ts);
+      .run(input.slug, input.name, input.base_url, JSON.stringify(input.placements), input.strategy, input.notes, input.docs, ts, ts);
     return Number(result.lastInsertRowid);
   }
 
   updateUpstream(id: number, input: UpstreamInput): boolean {
     const result = this.db
-      .query<never, [string, string, string, string, string, string, string, number]>(
-        `UPDATE upstreams SET slug = ?, name = ?, base_url = ?, placements = ?, strategy = ?, notes = ?, updated_at = ?
+      .query<never, [string, string, string, string, string, string, string, string, number]>(
+        `UPDATE upstreams SET slug = ?, name = ?, base_url = ?, placements = ?, strategy = ?, notes = ?, docs = ?, updated_at = ?
          WHERE id = ?`,
       )
-      .run(input.slug, input.name, input.base_url, JSON.stringify(input.placements), input.strategy, input.notes, now(), id);
+      .run(input.slug, input.name, input.base_url, JSON.stringify(input.placements), input.strategy, input.notes, input.docs, now(), id);
     return result.changes > 0;
   }
 

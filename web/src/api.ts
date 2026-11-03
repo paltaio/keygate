@@ -42,6 +42,7 @@ export interface UpstreamInput {
   placements: Placement[];
   strategy: Strategy;
   notes: string;
+  docs: string;
 }
 
 export interface Upstream extends UpstreamInput {

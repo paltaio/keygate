@@ -40,6 +40,7 @@ const schemas = {
     placements: z.array(placement).min(1).max(20),
     strategy: z.enum(STRATEGIES).default("active"),
     notes: z.string().max(2000).default(""),
+    docs: z.string().max(100_000).default(""),
   }),
   enabled: z.object({ enabled: z.boolean() }),
   apiKey: z.object({ name: z.string().min(1).max(100) }),

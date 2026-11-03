@@ -1,6 +1,6 @@
 import type { Env } from "./env.ts";
-import { bodyKinds, extractToken, inject, parseCookies, serializeBody, serializeCookies, type Carrier, type ParsedBody } from "./inject.ts";
-import { MissingSecretError, RESERVED_SLUGS, missingSecrets, parseList, parsePlacements, parseSecrets, placeholderNames, type Placement, type ProviderKey, type Store, type Upstream } from "./store.ts";
+import { TOKEN_QUERY, bodyKinds, extractToken, inject, parseCookies, serializeBody, serializeCookies, type Carrier, type ParsedBody } from "./inject.ts";
+import { MissingSecretError, RESERVED_SLUGS, missingSecrets, parseList, parsePlacements, parseSecrets, placeholderNames, type Placement, type ProviderKey, type Store, type Token, type Upstream } from "./store.ts";
 
 /** A credential flagged by the provider sits out of the round-robin pool for this long. */
 const FAILING_COOLDOWN_MS = 5 * 60_000;
@@ -45,6 +45,99 @@ export function isUpstreamHost(host: string | null, publicHost: string | undefin
   if (!host || !publicHost) return false;
   const hostname = host.split(":")[0]?.toLowerCase() ?? "";
   return hostname !== publicHost.toLowerCase() && hostname.endsWith(`.${publicHost.toLowerCase()}`);
+}
+
+const ONE_PLACEHOLDER = /^([^{]*)\{\{\s*[A-Za-z0-9_]+\s*\}\}([^{]*)$/;
+
+/** How a placement looks with the consumer token standing in for the credential, if it can carry one. */
+function tokenSlot(p: Placement): string | undefined {
+  const match = ONE_PLACEHOLDER.exec(p.value);
+  if (!match) return undefined;
+  const value = `${match[1] ?? ""}kg_...${match[2] ?? ""}`;
+  switch (p.type) {
+    case "header":
+      return `\`${p.name}: ${value}\``;
+    case "query":
+      return `\`?${p.name}=${value}\``;
+    case "cookie":
+      return `\`Cookie: ${p.name}=${value}\``;
+    case "json":
+      return `\`"${p.name}": "${value}"\` in the JSON body`;
+    case "form":
+      return `\`${p.name}=${value}\` in the form body`;
+  }
+}
+
+const TOKEN_SLOTS = ["`X-Keygate-Token: kg_...`", "`Authorization: Bearer kg_...`", `\`?${TOKEN_QUERY}=kg_...\``];
+
+/** The public llms.txt for an upstream: how to call it through keygate, followed by its docs. */
+export function llmsText(upstream: Upstream, origin: string, publicHost: string | undefined): string {
+  const bases = [`${origin}/${upstream.slug}`];
+  if (publicHost) bases.push(`https://${upstream.slug}.${publicHost}`);
+  const slots = [...TOKEN_SLOTS];
+  for (const p of parsePlacements(upstream.placements)) {
+    const slot = tokenSlot(p);
+    if (slot && !slots.includes(slot)) slots.push(slot);
+  }
+  const lines = [
+    `# ${upstream.name}`,
+    "",
+    `> ${upstream.name} API through keygate. Requests go to ${upstream.base_url} with the provider credential added; callers send a keygate token (kg_...).`,
+    "",
+    `- Base URL: ${bases.map((b) => `\`${b}\``).join(" or ")}`,
+    `- Paths after the base URL are appended to \`${upstream.base_url}\`.`,
+    `- Token, any one of: ${slots.join(", ")}`,
+  ];
+  const docs = upstream.docs.trim();
+  if (docs) lines.push("", docs);
+  return `${lines.join("\n")}\n`;
+}
+
+/** The root llms.txt. `upstreams` is what the caller's token reaches; without a token the list is left out. */
+export function directoryText(origin: string, upstreams: Upstream[] | undefined): string {
+  const lines = [
+    "# keygate",
+    "",
+    `> API proxy at ${origin}. Each upstream is a third-party API reached through keygate with a keygate token (kg_...); keygate adds the provider credential.`,
+    "",
+    `- Token, any one of: ${TOKEN_SLOTS.join(", ")}`,
+    `- \`${origin}/<slug>/llms.txt\` has an upstream's base URL, where else the token is accepted, and its docs.`,
+    "",
+    "## Upstreams",
+    "",
+  ];
+  if (!upstreams) lines.push(`Send a token with this request to list the upstreams it reaches: \`curl -H "X-Keygate-Token: kg_..." ${origin}/llms.txt\``);
+  else if (!upstreams.length) lines.push("This token reaches no upstreams.");
+  else for (const u of upstreams) lines.push(`- [${u.name}](${origin}/${u.slug}/llms.txt): \`${origin}/${u.slug}\` to ${u.base_url}`);
+  return `${lines.join("\n")}\n`;
+}
+
+function publicOrigin(env: Env, url: URL): string {
+  return env.KEYGATE_HOST ? `https://${env.KEYGATE_HOST}` : url.origin;
+}
+
+/** Why a token cannot be used, or undefined when it can. */
+function tokenRefusal(token: Token | null): { code: string; message: string } | undefined {
+  if (!token || token.revoked_at) return { code: "invalid_token", message: "This token is unknown or revoked" };
+  if (!token.enabled) return { code: "disabled_token", message: "This token is disabled" };
+  if (token.expires_at && token.expires_at <= new Date().toISOString()) return { code: "expired_token", message: "This token has expired" };
+  return undefined;
+}
+
+/** GET /llms.txt on the bare host. A token, if sent, must be valid; the list then covers its scopes. */
+export function serveDirectory(store: Store, env: Env, req: Request): Response {
+  const url = new URL(req.url);
+  const value = extractToken({ url, headers: new Headers(req.headers) }, []);
+  let upstreams: Upstream[] | undefined;
+  if (value) {
+    const token = store.tokenByValue(value);
+    const refusal = tokenRefusal(token);
+    if (refusal || !token) return error(401, refusal?.code ?? "invalid_token", refusal?.message ?? "This token is unknown or revoked");
+    const scopes = parseList(token.scopes);
+    upstreams = store.upstreams().filter((u) => scopes.includes("*") || scopes.includes(u.slug));
+  }
+  const text = directoryText(publicOrigin(env, url), upstreams);
+  return new Response(req.method === "HEAD" ? null : text, { headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" } });
 }
 
 function joinUrl(base: string, path: string, search: string): URL {
@@ -145,6 +238,11 @@ export function createProxy(options: ProxyOptions): (req: Request) => Promise<Re
       return error(404, "unknown_upstream", "No upstream is configured for this host or path");
     }
 
+    if (target.path === "/llms.txt" && (req.method === "GET" || req.method === "HEAD")) {
+      const text = llmsText(upstream, publicOrigin(env, url), env.KEYGATE_HOST);
+      return new Response(req.method === "HEAD" ? null : text, { headers: { "content-type": "text/plain; charset=utf-8", "access-control-allow-origin": "*" } });
+    }
+
     const origin = req.headers.get("origin");
     if (req.method === "OPTIONS" && origin && req.headers.has("access-control-request-method")) {
       if (!store.originAllowed(upstream.slug, origin)) return error(403, "origin_not_allowed", "No token allows this origin");
@@ -190,9 +288,8 @@ export function createProxy(options: ProxyOptions): (req: Request) => Promise<Re
     const tokenValue = extractToken(carrier, placements);
     if (!tokenValue) return reject(null, 401, "missing_token", "Send a keygate token in X-Keygate-Token, Authorization: Bearer, ?keygate_token, or the upstream's own key slot", body.bytes);
     const token = store.tokenByValue(tokenValue);
-    if (!token || token.revoked_at) return reject(token?.id ?? null, 401, "invalid_token", "This token is unknown or revoked", body.bytes);
-    if (!token.enabled) return reject(token.id, 401, "disabled_token", "This token is disabled", body.bytes);
-    if (token.expires_at && token.expires_at <= new Date().toISOString()) return reject(token.id, 401, "expired_token", "This token has expired", body.bytes);
+    const refusal = tokenRefusal(token);
+    if (refusal || !token) return reject(token?.id ?? null, 401, refusal?.code ?? "invalid_token", refusal?.message ?? "This token is unknown or revoked", body.bytes);
     const scopes = parseList(token.scopes);
     if (!scopes.includes("*") && !scopes.includes(upstream.slug)) return reject(token.id, 403, "upstream_not_in_scope", `This token is not scoped to ${upstream.slug}`, body.bytes);
     if (origin) {

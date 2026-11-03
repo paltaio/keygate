@@ -5,7 +5,7 @@ import { serveStatic } from "hono/bun";
 import { adminRoutes } from "./admin.ts";
 import { bootstrapAdmin } from "./auth.ts";
 import { loadEnv } from "./env.ts";
-import { createProxy, isUpstreamHost } from "./proxy.ts";
+import { createProxy, isUpstreamHost, serveDirectory } from "./proxy.ts";
 import { Store } from "./store.ts";
 
 const env = loadEnv();
@@ -23,6 +23,7 @@ app.use("*", async (c, next) => {
 
 app.get("/", (c) => c.redirect("/admin"));
 app.get("/health", (c) => c.json({ ok: true }));
+app.get("/llms.txt", (c) => serveDirectory(store, env, c.req.raw));
 
 const skillDir = "./skill";
 const skillTemplate = await Bun.file(join(skillDir, "SKILL.md")).text();

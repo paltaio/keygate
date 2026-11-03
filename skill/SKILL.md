@@ -48,7 +48,12 @@ URL --placement P [--placement P] [--strategy active|round_robin]`,
 a JSON object body) or `form` (a urlencoded field); `{{name}}` in the template
 is filled from the credential, text outside it is sent as-is. Adding a
 placement with a new name flags existing credentials as missing that value;
-it never blocks them.
+it never blocks them. `--docs T` or `--docs @file.md` sets public markdown
+served at `https://{{host}}/<slug>/llms.txt` with no token, below the base
+URL and token lines keygate generates; keep secrets out of it. `--notes` stays
+private to the dashboard and API. `https://{{host}}/llms.txt` sent with a
+consumer token lists the upstreams that token reaches; point a client agent
+there with its token.
 
 Credentials: `credentials <slug>`, `credential add <slug> --label L --value
 name=VALUE [--value ...] [--standby]`, `credential edit <id> [--label L]

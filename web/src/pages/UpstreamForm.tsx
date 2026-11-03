@@ -29,10 +29,11 @@ const EMPTY: UpstreamInput = {
   placements: PLACEMENT_PRESETS[0]?.placements.map((p) => ({ ...p })) ?? [],
   strategy: "active",
   notes: "",
+  docs: "",
 };
 
 function fromUpstream(u: Upstream): UpstreamInput {
-  return { slug: u.slug, name: u.name, base_url: u.base_url, placements: u.placements.map((p) => ({ ...p })), strategy: u.strategy, notes: u.notes };
+  return { slug: u.slug, name: u.name, base_url: u.base_url, placements: u.placements.map((p) => ({ ...p })), strategy: u.strategy, notes: u.notes, docs: u.docs };
 }
 
 function validateFields(form: UpstreamInput): Omit<Errors, "placements"> {
@@ -62,7 +63,7 @@ export default function UpstreamForm({ initial, mode, submitLabel, onSubmit }: P
   const [errors, setErrors] = useState<Errors>(NO_ERRORS);
   const action = useAction(onSubmit);
 
-  const set = <K extends "slug" | "name" | "base_url" | "notes" | "strategy">(key: K, value: UpstreamInput[K]): void => {
+  const set = <K extends "slug" | "name" | "base_url" | "notes" | "docs" | "strategy">(key: K, value: UpstreamInput[K]): void => {
     setForm((f) => ({ ...f, [key]: value }));
     const field: "slug" | "name" | "base_url" | undefined = key === "slug" || key === "name" || key === "base_url" ? key : undefined;
     if (field && errors[field]) setErrors((e) => ({ ...e, [field]: undefined }));
@@ -81,6 +82,7 @@ export default function UpstreamForm({ initial, mode, submitLabel, onSubmit }: P
       base_url: form.base_url.trim(),
       placements: cleanPlacements(form.placements),
       notes: form.notes.trim(),
+      docs: form.docs.trim(),
     };
     const found: Errors = { ...validateFields(cleaned), placements: mode === "create" ? validatePlacements(cleaned.placements) : NO_PLACEMENT_ERRORS };
     setErrors(found);
@@ -123,6 +125,9 @@ export default function UpstreamForm({ initial, mode, submitLabel, onSubmit }: P
         ) : null}
         <Field label="Notes" htmlFor="upstream-notes" hint="Only visible here.">
           <Textarea id="upstream-notes" rows={3} value={form.notes} onChange={(e) => set("notes", e.target.value)} />
+        </Field>
+        <Field label="Docs" htmlFor="upstream-docs" hint={`Markdown, readable by anyone at ${window.location.origin}/${form.slug || "slug"}/llms.txt, below the base URL and token lines keygate writes.`}>
+          <Textarea id="upstream-docs" mono rows={8} value={form.docs} onChange={(e) => set("docs", e.target.value)} spellCheck={false} />
         </Field>
         {action.error ? (
           <div className={mode === "create" ? "" : "md:col-span-2"}>

@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import { loadEnv } from "./env.ts";
-import { createProxy, resolveTarget } from "./proxy.ts";
+import { createProxy, resolveTarget, serveDirectory } from "./proxy.ts";
 import { Store, type Placement } from "./store.ts";
 
 const env = loadEnv({ KEYGATE_HOST: "keygate.test", KEYGATE_DATA_DIR: ":memory:" });
@@ -31,7 +31,7 @@ const apiKeyHeader: Placement[] = [{ type: "header", name: "x-api-key", value: "
 function setup(placements: Placement[], respond?: () => Response, secrets: Record<string, string> = { key: "REAL" }) {
   const store = new Store(":memory:");
   const captured: Captured[] = [];
-  const upstreamId = store.createUpstream({ slug: "up", name: "Up", base_url: "https://up.example/base", placements, strategy: "active", notes: "" });
+  const upstreamId = store.createUpstream({ slug: "up", name: "Up", base_url: "https://up.example/base", placements, strategy: "active", notes: "", docs: "" });
   const userId = store.createUser("a@b.c", "A", "x");
   const keyId = store.addKey(upstreamId, "k1", secrets, true, userId);
   const { token } = store.createToken({ name: "t", scopes: ["up"], origins: ["https://app.test"], expires_at: null }, userId);
@@ -92,6 +92,34 @@ describe("proxy", () => {
     expect(ctx.captured).toHaveLength(0);
     expect(ctx.store.requests({ limit: 10, status: "proxy_error" })).toHaveLength(3);
     expect(ctx.store.requests({ limit: 10, status: "client_error" })).toHaveLength(0);
+  });
+
+  test("llms.txt is public and carries the docs", async () => {
+    const upstream = ctx.store.upstreamBySlug("up");
+    if (!upstream) throw new Error("upstream missing");
+    ctx.store.updateUpstream(upstream.id, { slug: "up", name: "Up", base_url: "https://up.example/base", placements: apiKeyHeader, strategy: "active", notes: "private", docs: "## Search\n\nPOST /v1/search" });
+    const res = await ctx.proxy(new Request("http://keygate.test/up/llms.txt"));
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    expect(text).toStartWith("# Up\n");
+    expect(text).toContain("`https://keygate.test/up` or `https://up.keygate.test`");
+    expect(text).toContain("`x-api-key: kg_...`");
+    expect(text).toEndWith("## Search\n\nPOST /v1/search\n");
+    expect(text).not.toContain("private");
+    const sub = await ctx.proxy(new Request("http://x/llms.txt", { headers: { host: "up.keygate.test" } }));
+    expect(await sub.text()).toBe(text);
+    expect(ctx.captured).toHaveLength(0);
+  });
+
+  test("root llms.txt lists the upstreams a token reaches", async () => {
+    ctx.store.createUpstream({ slug: "other", name: "Other", base_url: "https://other.example", placements: apiKeyHeader, strategy: "active", notes: "", docs: "" });
+    const anonymous = await serveDirectory(ctx.store, env, new Request("http://keygate.test/llms.txt")).text();
+    expect(anonymous).toStartWith("# keygate\n");
+    expect(anonymous).not.toContain("/up/llms.txt)");
+    const scoped = await serveDirectory(ctx.store, env, new Request("http://keygate.test/llms.txt", { headers: { authorization: `Bearer ${ctx.token}` } })).text();
+    expect(scoped).toContain("- [Up](https://keygate.test/up/llms.txt): `https://keygate.test/up` to https://up.example/base");
+    expect(scoped).not.toContain("Other");
+    expect(serveDirectory(ctx.store, env, new Request("http://keygate.test/llms.txt?keygate_token=kg_nope")).status).toBe(401);
   });
 
   test("unknown upstream is refused and logged", async () => {
@@ -203,7 +231,7 @@ describe("proxy", () => {
     const c = setup(two, undefined, { token: "T1", key: "K1" });
     const upstream = c.store.upstreamBySlug("up");
     if (!upstream) throw new Error("upstream missing");
-    c.store.updateUpstream(upstream.id, { slug: "up", name: "Up", base_url: "https://up.example/base", placements: two, strategy: "round_robin", notes: "" });
+    c.store.updateUpstream(upstream.id, { slug: "up", name: "Up", base_url: "https://up.example/base", placements: two, strategy: "round_robin", notes: "", docs: "" });
     const partial = c.store.addKey(upstream.id, "k2", { token: "T2" }, false, 1);
     const call = async () => {
       await (await c.proxy(new Request("http://keygate.test/up/x", { headers: { "x-keygate-token": c.token } }))).text();
@@ -241,7 +269,7 @@ describe("proxy", () => {
     const c = setup(apiKeyHeader, () => new Response("x", { status }));
     const upstream = c.store.upstreamBySlug("up");
     if (!upstream) throw new Error("upstream missing");
-    c.store.updateUpstream(upstream.id, { slug: "up", name: "Up", base_url: "https://up.example/base", placements: apiKeyHeader, strategy: "round_robin", notes: "" });
+    c.store.updateUpstream(upstream.id, { slug: "up", name: "Up", base_url: "https://up.example/base", placements: apiKeyHeader, strategy: "round_robin", notes: "", docs: "" });
     const k2 = c.store.addKey(upstream.id, "k2", { key: "SECOND" }, false, 1);
     c.store.addKey(upstream.id, "k3", { key: "THIRD" }, false, 1);
     const call = async () => {

@@ -131,6 +131,7 @@ interface Upstream {
   placements: Placement[];
   strategy: "active" | "round_robin";
   notes: string;
+  docs: string;
   secret_names: string[];
   active_key: Credential | null;
   key_count: number;
@@ -231,6 +232,7 @@ function upstreamText(u: Upstream): string {
     `  values: ${u.secret_names.join(", ") || "none"}   usable credentials: ${u.usable_key_count}/${u.key_count}`,
   ];
   if (u.notes) lines.push(`  notes: ${u.notes}`);
+  lines.push(`  llms.txt: ${baseUrl}/${u.slug}/llms.txt${u.docs ? ` (docs: ${u.docs.length} chars)` : ""}`);
   if (u.keys) lines.push("", table(credentialRows(u.keys, u.strategy)));
   return lines.join("\n");
 }
@@ -238,6 +240,7 @@ function upstreamText(u: Upstream): string {
 function upstreamInput(base: Partial<Upstream>, slugOverride?: string): Record<string, unknown> {
   const placements = multi("placement").length ? multi("placement").map(parsePlacement) : base.placements;
   if (!placements?.length) fail("at least one --placement is required");
+  const docs = flag("docs");
   return {
     slug: flag("slug") ?? slugOverride ?? base.slug,
     name: flag("name") ?? base.name ?? slugOverride ?? base.slug,
@@ -245,6 +248,7 @@ function upstreamInput(base: Partial<Upstream>, slugOverride?: string): Record<s
     placements,
     strategy: flag("strategy") ?? base.strategy ?? "active",
     notes: flag("notes") ?? base.notes ?? "",
+    docs: (docs?.startsWith("@") ? readFileSync(docs.slice(1), "utf8") : docs) ?? base.docs ?? "",
   };
 }
 
@@ -465,8 +469,8 @@ Setup: KEYGATE_URL and KEYGATE_API_KEY in the environment or ${DEFAULT_ENV_FILE}
 overview                                      Traffic and credential state per upstream, last 24h
 upstreams                                     List upstreams
 upstream <slug>                               One upstream with its credentials
-upstream create <slug> --base-url U --placement P... [--name N] [--strategy active|round_robin] [--notes T]
-upstream update <slug> [--slug S] [--name N] [--base-url U] [--placement P...] [--strategy S] [--notes T]
+upstream create <slug> --base-url U --placement P... [--name N] [--strategy active|round_robin] [--notes T] [--docs T|@file]
+upstream update <slug> [--slug S] [--name N] [--base-url U] [--placement P...] [--strategy S] [--notes T] [--docs T|@file]
 upstream delete <slug>
 credentials <slug>                            Credentials of an upstream
 credential add <slug> --label L --value name=VALUE... [--standby]

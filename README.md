@@ -38,6 +38,12 @@ The token is accepted in `X-Keygate-Token`, in `Authorization: Bearer`, in
 is what makes SDKs work with only a base URL change. Browser callers must send
 an `Origin` that is on the token's origin list.
 
+`GET /<slug>/llms.txt` needs no token. It lists the base URL and the token
+slots for that upstream, followed by the upstream's docs field (markdown, set
+in the dashboard). Notes stay private. `GET /llms.txt` on the bare host
+explains the token and, when the request carries one, lists the upstreams in
+its scope with links to their llms.txt.
+
 ## Model
 
 - Upstream: a slug, a base URL, and one or more placements.

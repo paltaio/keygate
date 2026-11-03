@@ -13,7 +13,7 @@ function PlacementsPanel({ upstream, onSaved }: { upstream: Detail; onSaved: () 
   const [placements, setPlacements] = useState<Placement[]>(() => upstream.placements.map((p) => ({ ...p })));
   const [errors, setErrors] = useState<PlacementErrors>(NO_PLACEMENT_ERRORS);
   const action = useAction(async (next: Placement[]) => {
-    await api.upstreams.update(upstream.id, { slug: upstream.slug, name: upstream.name, base_url: upstream.base_url, strategy: upstream.strategy, notes: upstream.notes, placements: next });
+    await api.upstreams.update(upstream.id, { slug: upstream.slug, name: upstream.name, base_url: upstream.base_url, strategy: upstream.strategy, notes: upstream.notes, docs: upstream.docs, placements: next });
     onSaved();
   });
   const dirty = JSON.stringify(placements) !== JSON.stringify(upstream.placements);
