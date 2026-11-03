@@ -182,14 +182,14 @@ describe("admin policies", () => {
     expect((await call("POST", "/policies", { source: 42 })).status).toBe(400);
     const huge = await call("POST", "/policies", { source: "x".repeat(200 * 1024) });
     expect(huge.status).toBe(400);
-    expect(((await huge.json()) as { message: string }).message).toBe("source: source exceeds 100 KB");
+    expect(await huge.json()).toEqual({ error: "compile_error", message: "source exceeds 100 KB" });
     expect(store.policies()).toHaveLength(1);
   });
 
   test("a name in use is refused on create and on rename", async () => {
     const taken = await call("POST", "/policies", { source: gate("gate", "dup") });
     expect(taken.status).toBe(409);
-    expect(((await taken.json()) as { error: string }).error).toBe("name_taken");
+    expect(await taken.json()).toEqual({ error: "name_taken", message: "A policy named gate already exists; change meta.name" });
     const other = await create(noop("other"));
     const rename = await call("PATCH", `/policies/${other.id}`, { source: noop("gate") });
     expect(rename.status).toBe(409);
@@ -288,5 +288,35 @@ describe("admin policies", () => {
     expect(((await res.json()) as { message: string }).message).toBe("No such token, or it is revoked");
     expect((await call("PUT", "/tokens/999/policies", { policies: [] })).status).toBe(404);
     expect((await call("DELETE", `/policies/${other}`)).status).toBe(200);
+  });
+
+  test("tokens are created and updated together with their policies", async () => {
+    const policy = await create(noop("issued"));
+    const tokenCount = store.tokens().length;
+    const unknown = await call("POST", "/tokens", { name: "t3", scopes: ["up"], policies: [{ policy_id: policy.id, enabled: true }, { policy_id: 999, enabled: true }] });
+    expect(unknown.status).toBe(400);
+    expect(await unknown.json()).toMatchObject({ error: "unknown_policy", policy_ids: [999] });
+    expect(store.tokens()).toHaveLength(tokenCount);
+
+    const created = await call("POST", "/tokens", { name: "t3", scopes: ["up"], policies: [{ policy_id: policy.id, enabled: false }] });
+    expect(created.status).toBe(201);
+    const token = (await created.json()) as TokenBody & { token: string };
+    expect(token.token).toStartWith("kg_");
+    expect(token.policies).toEqual([{ policy_id: policy.id, name: "issued", enabled: false }]);
+
+    const dup = await call("PATCH", `/tokens/${token.id}`, { name: "renamed", scopes: ["up"], policies: [{ policy_id: policy.id, enabled: true }, { policy_id: policy.id, enabled: true }] });
+    expect(dup.status).toBe(400);
+    expect(await dup.json()).toMatchObject({ error: "duplicate_policy", policy_ids: [policy.id] });
+    expect(store.tokenById(token.id)?.name).toBe("t3");
+    expect(store.tokenPolicies(token.id)).toHaveLength(1);
+
+    const patched = await call("PATCH", `/tokens/${token.id}`, { name: "renamed", scopes: ["up"], policies: [{ policy_id: policy.id, enabled: true }] });
+    expect(await patched.json()).toMatchObject({ id: token.id, name: "renamed", policies: [{ policy_id: policy.id, name: "issued", enabled: true }] });
+    const kept = await call("PATCH", `/tokens/${token.id}`, { name: "renamed-2", scopes: ["up"] });
+    expect(((await kept.json()) as TokenBody).policies).toHaveLength(1);
+
+    expect((await call("DELETE", `/tokens/${token.id}`)).status).toBe(200);
+    expect((await call("PATCH", `/tokens/${token.id}`, { name: "revoked", scopes: ["up"], policies: [] })).status).toBe(404);
+    expect(store.tokenById(token.id)?.name).toBe("renamed-2");
   });
 });

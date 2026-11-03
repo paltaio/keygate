@@ -94,6 +94,11 @@ export interface TokenPolicyInput {
   enabled: boolean;
 }
 
+/** Body of POST and PATCH /tokens; `policies` replaces the ordered attachment list in the same write. */
+export interface TokenWrite extends TokenInput {
+  policies?: TokenPolicyInput[];
+}
+
 export interface Token extends TokenInput {
   id: number;
   hint: string;
@@ -259,12 +264,11 @@ export const api = {
   },
   tokens: {
     list: () => request<Token[]>("GET", "/tokens"),
-    create: (input: TokenInput) => request<CreatedToken>("POST", "/tokens", input),
-    update: (id: number, input: TokenInput) => request<Token>("PATCH", `/tokens/${id}`, input),
+    create: (input: TokenWrite) => request<CreatedToken>("POST", "/tokens", input),
+    update: (id: number, input: TokenWrite) => request<Token>("PATCH", `/tokens/${id}`, input),
     setEnabled: (id: number, enabled: boolean) => request<Token>("PATCH", `/tokens/${id}/enabled`, { enabled }),
     rotate: (id: number) => request<CreatedToken>("POST", `/tokens/${id}/rotate`),
     revoke: (id: number) => request<{ ok: true }>("DELETE", `/tokens/${id}`),
-    setPolicies: (id: number, policies: TokenPolicyInput[]) => request<TokenPolicy[]>("PUT", `/tokens/${id}/policies`, { policies }),
   },
   policies: {
     list: () => request<Policy[]>("GET", "/policies"),

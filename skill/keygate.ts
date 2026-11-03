@@ -286,6 +286,23 @@ function tokenInput(base: Partial<Token>): Record<string, unknown> {
   };
 }
 
+/** --policy NAME[:off] values as an ordered attachment list. */
+async function attachments(specs: string[]): Promise<Array<{ policy_id: number; enabled: boolean }>> {
+  const ids = new Map((await api<Policy[]>("/policies")).map((p) => [p.name, p.id]));
+  return specs.map((spec) => {
+    const [name = "", state, extra] = spec.split(":");
+    if (extra !== undefined || (state !== undefined && state !== "on" && state !== "off")) fail(`--policy wants name or name:off, got "${spec}"`);
+    const policyId = ids.get(name) ?? fail(`no policy "${name}"; run: bun keygate.ts policies`);
+    return { policy_id: policyId, enabled: state !== "off" };
+  });
+}
+
+/** The token body, with the --policy list when one was given. */
+async function tokenWrite(base: Partial<Token>): Promise<Record<string, unknown>> {
+  const specs = multi("policy");
+  return { ...tokenInput(base), ...(specs.length ? { policies: await attachments(specs) } : {}) };
+}
+
 const attachmentList = (t: Token): string => t.policies.map((p) => (p.enabled ? p.name : `${p.name}:off`)).join(",") || "-";
 
 function tokenRows(tokens: Token[]): string[][] {
@@ -450,14 +467,14 @@ async function run(): Promise<void> {
     }
     case "token": {
       if (sub === "create") {
-        const created = await api<Token & { token: string }>("/tokens", { method: "POST", body: tokenInput({}) });
+        const created = await api<Token & { token: string }>("/tokens", { method: "POST", body: await tokenWrite({}) });
         emit(created, () => `token ${created.id} "${created.name}" for ${created.scopes.join(",")}\n${created.token}\nShown once. Store it now.`);
         return;
       }
       const id = idArg(target, "token");
       if (sub === "update") {
         const current = (await api<Token[]>("/tokens")).find((t) => t.id === id) ?? fail(`no token ${id}`);
-        const updated = await api<Token>(`/tokens/${id}`, { method: "PATCH", body: tokenInput(current) });
+        const updated = await api<Token>(`/tokens/${id}`, { method: "PATCH", body: await tokenWrite(current) });
         emit(updated, () => table(tokenRows([updated])));
         return;
       }
@@ -483,14 +500,7 @@ async function run(): Promise<void> {
           emit(current.policies, () => attachmentText(id, current.policies));
           return;
         }
-        const ids = new Map((await api<Policy[]>("/policies")).map((p) => [p.name, p.id]));
-        const policies = specs.map((spec) => {
-          const [name = "", state, extra] = spec.split(":");
-          if (extra !== undefined || (state !== undefined && state !== "on" && state !== "off")) fail(`--policy wants name or name:off, got "${spec}"`);
-          const policyId = ids.get(name) ?? fail(`no policy "${name}"; run: bun keygate.ts policies`);
-          return { policy_id: policyId, enabled: state !== "off" };
-        });
-        const list = await api<Token["policies"]>(`/tokens/${id}/policies`, { method: "PUT", body: { policies } });
+        const list = await api<Token["policies"]>(`/tokens/${id}/policies`, { method: "PUT", body: { policies: await attachments(specs) } });
         emit(list, () => attachmentText(id, list));
         return;
       }
@@ -512,13 +522,15 @@ async function run(): Promise<void> {
         emit(created, () => `created policy ${created.name}`);
         return;
       }
+      const named = ["update", "enable", "disable", "delete"];
       if (target === undefined) {
+        if (named.includes(sub ?? "")) fail(`policy ${sub} needs a name`);
         const found = await policyByName(sub ?? fail("policy needs a name"));
         const detail = await api<PolicyDetail>(`/policies/${found.id}`);
         emit(detail, () => policyText(detail));
         return;
       }
-      if (!["update", "enable", "disable", "delete"].includes(sub ?? "")) fail(`unknown policy command "${sub ?? ""}"`);
+      if (!named.includes(sub ?? "")) fail(`unknown policy command "${sub ?? ""}"`);
       const current = await policyByName(target);
       if (sub === "update") {
         const updated = await api<PolicyDetail>(`/policies/${current.id}`, { method: "PATCH", body: { source: policySource() } });
@@ -591,8 +603,8 @@ credential add <slug> --label L --value name=VALUE... [--standby]
 credential edit <id> [--label L] [--value name=VALUE...] [--clear name...]
 credential activate|enable|disable|revoke <id>
 tokens                                        List consumer tokens
-token create --name N --scope SLUG... [--origin O...] [--expires ISO]
-token update <id> [--name N] [--scope SLUG...] [--origin O...|--origin none] [--expires ISO|none]
+token create --name N --scope SLUG... [--origin O...] [--expires ISO] [--policy NAME[:off]...]
+token update <id> [--name N] [--scope SLUG...] [--origin O...|--origin none] [--expires ISO|none] [--policy NAME[:off]...]
 token enable|disable|rotate|revoke <id>
 token policies <id> [--policy NAME[:off]...] [--clear]
 policies                                      List policies
@@ -608,7 +620,8 @@ template holds {{name}} where a credential value goes: "header:Authorization=Bea
 --value is name=VALUE, name=@file to read a file, or name=- to read stdin.
 --scope takes an upstream slug or * for all. --json prints the raw API response.
 token policies prints the token's policies; --policy replaces them in the given order, NAME:off
-attaches one switched off, and --clear detaches all.
+attaches one switched off, and --clear detaches all. On token create and update, --policy sets the
+list in the same write as the token.
 `);
 }
 

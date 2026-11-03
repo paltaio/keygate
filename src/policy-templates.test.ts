@@ -45,10 +45,12 @@ describe("dashboard policy templates", () => {
     expect(p.runRequest(request({ body: undefined }), { ...ctx, bodySkipped: "too_large" })).toMatchObject({ kind: "deny", status: 400 });
   });
 
-  test("redact-body replaces emails and the literal string", async () => {
+  test("redact-body replaces emails and the literal string, and denies an unchecked body", async () => {
     const p = await template("redact-body");
     const decision = p.runRequest(request({ body: { messages: [{ content: "mail a.b@example.com about Project Falcon" }] } }), ctx);
     expect(decision).toMatchObject({ kind: "continue", value: { body: { messages: [{ content: "mail [email] about [redacted]" }] } } });
+    expect(p.runRequest(request({ body: undefined }), { ...ctx, bodySkipped: "too_large" })).toMatchObject({ kind: "deny", status: 400 });
+    expect(p.runRequest(request({ method: "GET", body: undefined }), ctx).kind).toBe("continue");
   });
 
   test("add-header sets the token name", async () => {

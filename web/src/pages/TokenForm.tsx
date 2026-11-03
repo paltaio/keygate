@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { api, type Token, type TokenInput, type TokenPolicy, type TokenPolicyInput } from "../api.ts";
+import { api, type Token, type TokenPolicy, type TokenPolicyInput, type TokenWrite } from "../api.ts";
 import { fromLocalInput, isOrigin, toLocalInput } from "../format.ts";
 import { useAction, useLoad } from "../hooks.ts";
 import { TokenPoliciesEditor } from "../token-policies.tsx";
@@ -48,8 +48,8 @@ const EMPTY: FormState = { name: "", allScopes: true, scopes: [], originMode: "n
 interface Props {
   initial?: Token;
   submitLabel: string;
-  /** `policies` is the ordered attachment list, or null when it did not change. */
-  onSubmit: (input: TokenInput, policies: TokenPolicyInput[] | null) => Promise<void>;
+  /** `input.policies` is the ordered attachment list, left out when it did not change. */
+  onSubmit: (input: TokenWrite) => Promise<void>;
 }
 
 function attachments(list: TokenPolicy[]): TokenPolicyInput[] {
@@ -94,7 +94,7 @@ export default function TokenForm({ initial, submitLabel, onSubmit }: Props) {
     }
     const next = attachments(policies);
     const policiesChanged = showPolicies && JSON.stringify(next) !== JSON.stringify(attachments(initial?.policies ?? []));
-    void action.run({ name, scopes: form.allScopes ? ["*"] : form.scopes, origins, expires_at }, policiesChanged ? next : null);
+    void action.run({ name, scopes: form.allScopes ? ["*"] : form.scopes, origins, expires_at, ...(policiesChanged ? { policies: next } : {}) });
   };
 
   // Slugs the token already names that no longer exist as upstreams stay selectable so editing does not silently drop them.

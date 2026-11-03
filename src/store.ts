@@ -341,10 +341,11 @@ export type PolicyDeleteResult =
   | { status: "not_found" }
   | { status: "in_use"; tokens: TokenRef[] };
 
-export type SetTokenPoliciesResult =
-  | { ok: true }
-  | { ok: false; error: "token_not_found" }
-  | { ok: false; error: "unknown_policy" | "duplicate_policy"; policy_ids: number[] };
+export type PolicyListError = { ok: false; error: "unknown_policy" | "duplicate_policy"; policy_ids: number[] };
+
+export type SetTokenPoliciesResult = { ok: true } | { ok: false; error: "token_not_found" } | PolicyListError;
+
+export type CreateTokenResult = { ok: true; id: number; token: string } | PolicyListError;
 
 export interface UpstreamStat {
   upstream_id: number | null;
@@ -808,22 +809,58 @@ export class Store {
 
   /** Replaces the token's attachment list with `attachments` in the given order, all or nothing. */
   setTokenPolicies(tokenId: number, attachments: readonly TokenPolicyInput[]): SetTokenPoliciesResult {
-    const ids = attachments.map((a) => a.policy_id);
     const replace = this.db.transaction((): SetTokenPoliciesResult => {
       const token = this.tokenById(tokenId);
       if (!token || token.revoked_at) return { ok: false, error: "token_not_found" };
-      const duplicates = [...new Set(ids.filter((id, i) => ids.indexOf(id) !== i))];
-      if (duplicates.length > 0) return { ok: false, error: "duplicate_policy", policy_ids: duplicates };
-      const unknown = ids.filter((id) => !this.policyById(id));
-      if (unknown.length > 0) return { ok: false, error: "unknown_policy", policy_ids: unknown };
-      this.db.query<never, [number]>("DELETE FROM token_policies WHERE token_id = ?").run(tokenId);
-      const insert = this.db.query<never, [number, number, number, number]>(
-        "INSERT INTO token_policies (token_id, policy_id, position, enabled) VALUES (?, ?, ?, ?)",
-      );
-      attachments.forEach((a, position) => insert.run(tokenId, a.policy_id, position, a.enabled ? 1 : 0));
+      const invalid = this.invalidPolicyList(attachments);
+      if (invalid) return invalid;
+      this.writeTokenPolicies(tokenId, attachments);
       return { ok: true };
     });
     return replace();
+  }
+
+  /** Creates a token with `attachments` in order, in one transaction; nothing is written when the list is invalid. */
+  createTokenWithPolicies(input: TokenInput, createdBy: number, attachments: readonly TokenPolicyInput[]): CreateTokenResult {
+    const run = this.db.transaction((): CreateTokenResult => {
+      const invalid = this.invalidPolicyList(attachments);
+      if (invalid) return invalid;
+      const created = this.createToken(input, createdBy);
+      this.writeTokenPolicies(created.id, attachments);
+      return { ok: true, ...created };
+    });
+    return run();
+  }
+
+  /** Updates a live token and replaces its attachment list in one transaction, all or nothing. */
+  updateTokenWithPolicies(id: number, input: TokenInput, attachments: readonly TokenPolicyInput[]): SetTokenPoliciesResult {
+    const run = this.db.transaction((): SetTokenPoliciesResult => {
+      const token = this.tokenById(id);
+      if (!token || token.revoked_at) return { ok: false, error: "token_not_found" };
+      const invalid = this.invalidPolicyList(attachments);
+      if (invalid) return invalid;
+      this.updateToken(id, input);
+      this.writeTokenPolicies(id, attachments);
+      return { ok: true };
+    });
+    return run();
+  }
+
+  private invalidPolicyList(attachments: readonly TokenPolicyInput[]): PolicyListError | undefined {
+    const ids = attachments.map((a) => a.policy_id);
+    const duplicates = [...new Set(ids.filter((id, i) => ids.indexOf(id) !== i))];
+    if (duplicates.length > 0) return { ok: false, error: "duplicate_policy", policy_ids: duplicates };
+    const unknown = ids.filter((id) => !this.policyById(id));
+    if (unknown.length > 0) return { ok: false, error: "unknown_policy", policy_ids: unknown };
+    return undefined;
+  }
+
+  private writeTokenPolicies(tokenId: number, attachments: readonly TokenPolicyInput[]): void {
+    this.db.query<never, [number]>("DELETE FROM token_policies WHERE token_id = ?").run(tokenId);
+    const insert = this.db.query<never, [number, number, number, number]>(
+      "INSERT INTO token_policies (token_id, policy_id, position, enabled) VALUES (?, ?, ?, ?)",
+    );
+    attachments.forEach((a, position) => insert.run(tokenId, a.policy_id, position, a.enabled ? 1 : 0));
   }
 
   runnablePolicies(tokenId: number): RunnablePolicy[] {

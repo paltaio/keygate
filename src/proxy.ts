@@ -128,12 +128,14 @@ function publicOrigin(env: Env, url: URL): string {
   return env.KEYGATE_HOST ? `https://${env.KEYGATE_HOST}` : url.origin;
 }
 
-/** Why a token cannot be used, or undefined when it can. */
-function tokenRefusal(token: Token | null): { code: string; message: string } | undefined {
-  if (!token || token.revoked_at) return { code: "invalid_token", message: "This token is unknown or revoked" };
-  if (!token.enabled) return { code: "disabled_token", message: "This token is disabled" };
-  if (token.expires_at && token.expires_at <= new Date().toISOString()) return { code: "expired_token", message: "This token has expired" };
-  return undefined;
+type TokenCheck = { ok: true; token: Token } | { ok: false; code: string; message: string };
+
+/** The token when it can be used, else why not. */
+function usableToken(token: Token | null): TokenCheck {
+  if (!token || token.revoked_at) return { ok: false, code: "invalid_token", message: "This token is unknown or revoked" };
+  if (!token.enabled) return { ok: false, code: "disabled_token", message: "This token is disabled" };
+  if (token.expires_at && token.expires_at <= new Date().toISOString()) return { ok: false, code: "expired_token", message: "This token has expired" };
+  return { ok: true, token };
 }
 
 /** GET /llms.txt on the bare host. A token, if sent, must be valid; the list then covers its scopes. */
@@ -142,10 +144,9 @@ export function serveDirectory(store: Store, env: Env, req: Request): Response {
   const value = extractToken({ url, headers: new Headers(req.headers) }, []);
   let upstreams: Upstream[] | undefined;
   if (value) {
-    const token = store.tokenByValue(value);
-    const refusal = tokenRefusal(token);
-    if (refusal || !token) return error(401, refusal?.code ?? "invalid_token", refusal?.message ?? "This token is unknown or revoked");
-    const scopes = parseList(token.scopes);
+    const check = usableToken(store.tokenByValue(value));
+    if (!check.ok) return error(401, check.code, check.message);
+    const scopes = parseList(check.token.scopes);
     upstreams = store.upstreams().filter((u) => scopes.includes("*") || scopes.includes(u.slug));
   }
   const text = directoryText(publicOrigin(env, url), upstreams);
@@ -171,19 +172,18 @@ function corsHeaders(origin: string, req: Request): Record<string, string> {
 async function readBody(req: Request, wants: { json: boolean; form: boolean }): Promise<{ parsed?: ParsedBody; raw?: ArrayBuffer; bytes: number }> {
   if (req.method === "GET" || req.method === "HEAD") return { bytes: 0 };
   const kind = bodyMediaKind(req.headers.get("content-type"));
+  const raw = await req.arrayBuffer();
   if (wants.json && kind === "json") {
-    const text = await req.text();
+    const text = new TextDecoder().decode(raw);
     const value: Json = text.trim() ? JSON.parse(text) : {};
     if (typeof value !== "object" || value === null || Array.isArray(value)) {
       throw new ProxyError(400, "body_not_object", "The JSON body must be an object so the key can be added to it");
     }
-    return { parsed: { kind: "json", value }, bytes: text.length };
+    return { parsed: { kind: "json", value }, bytes: raw.byteLength };
   }
   if (wants.form && kind === "form") {
-    const text = await req.text();
-    return { parsed: { kind: "form", value: new URLSearchParams(text) }, bytes: text.length };
+    return { parsed: { kind: "form", value: new URLSearchParams(new TextDecoder().decode(raw)) }, bytes: raw.byteLength };
   }
-  const raw = await req.arrayBuffer();
   return { raw, bytes: raw.byteLength };
 }
 
@@ -304,9 +304,10 @@ export function createProxy(options: ProxyOptions): (req: Request, ip?: string |
 
     const tokenValue = extractToken(carrier, placements);
     if (!tokenValue) return reject(null, 401, "missing_token", "Send a keygate token in X-Keygate-Token, Authorization: Bearer, ?keygate_token, or the upstream's own key slot", body.bytes);
-    const token = store.tokenByValue(tokenValue);
-    const refusal = tokenRefusal(token);
-    if (refusal || !token) return reject(token?.id ?? null, 401, refusal?.code ?? "invalid_token", refusal?.message ?? "This token is unknown or revoked", body.bytes);
+    const found = store.tokenByValue(tokenValue);
+    const check = usableToken(found);
+    if (!check.ok) return reject(found?.id ?? null, 401, check.code, check.message, body.bytes);
+    const { token } = check;
     const scopes = parseList(token.scopes);
     if (!scopes.includes("*") && !scopes.includes(upstream.slug)) return reject(token.id, 403, "upstream_not_in_scope", `This token is not scoped to ${upstream.slug}`, body.bytes);
     if (origin) {
@@ -328,6 +329,7 @@ export function createProxy(options: ProxyOptions): (req: Request, ip?: string |
         request: req,
         carrier,
         raw: body.raw,
+        bytes: body.bytes,
         path: target.path,
         baseUrl: upstream.base_url,
         reservedHeaders: REQUEST_STRIP,
@@ -352,7 +354,8 @@ export function createProxy(options: ProxyOptions): (req: Request, ip?: string |
     if (carrier.body) {
       const serialized = serializeBody(carrier.body);
       outBody = serialized.text;
-      headers.set("content-type", serialized.contentType);
+      // With policies, runRequestPolicies has already settled the content type.
+      if (!lease.size) headers.set("content-type", serialized.contentType);
     } else if (typeof rawBody === "string" || (rawBody && rawBody.byteLength > 0)) {
       outBody = rawBody;
     }

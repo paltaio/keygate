@@ -31,7 +31,8 @@ export function onRequest(req, ctx) {
     label: "Redact body strings",
     source: String.raw`export const meta = { name: "redact-body", needs: ["body"] };
 
-export function onRequest(req) {
+export function onRequest(req, ctx) {
+  if (ctx.bodySkipped) return deny(400, "The request body could not be checked");
   if (req.body === undefined) return;
   req.body = replaceDeep(req.body, /[\w.+-]+@[\w-]+\.[\w.-]+/g, "[email]");
   req.body = replaceDeep(req.body, "Project Falcon", "[redacted]");

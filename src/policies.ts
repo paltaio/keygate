@@ -99,6 +99,8 @@ export interface RequestRun {
   carrier: Carrier;
   /** The request body as sent, when the placements did not parse it. */
   raw: ArrayBuffer | undefined;
+  /** Size of the request body as read. */
+  bytes: number;
   /** Path after the slug. */
   path: string;
   baseUrl: string;
@@ -130,15 +132,19 @@ export async function runRequestPolicies(lease: PolicyLease, run: RequestRun): P
     headers: Object.fromEntries(run.carrier.headers),
     body: exposed.value,
   };
+  let hooked = false;
   const result = await runChain(
     lease.entries,
     original,
-    (policy, value) => policy.runRequest(value, ctx),
+    (policy, value) => {
+      hooked ||= policy.onRequest;
+      return policy.runRequest(value, ctx);
+    },
     (before, after) => checkStep(run, exposed, before, after),
   );
   if (result.kind !== "continue") return result;
   try {
-    const body = apply(run, exposed, original, result.value);
+    const body = apply(run, exposed, original, result.value, hooked);
     return body === undefined ? { kind: "continue" } : { kind: "continue", body };
   } catch (e) {
     return failure(lease.entries.at(-1)?.row.name ?? "", messageOf(e));
@@ -200,7 +206,9 @@ async function responseChain(lease: PolicyLease, run: ResponseRun, exposed: Expo
   try {
     for (const name of Object.keys(original.headers)) if (!Object.hasOwn(final.headers, name)) run.headers.delete(name);
     for (const [name, value] of Object.entries(final.headers)) if (original.headers[name] !== value) run.headers.set(name, value);
-    return { kind: "continue", status: final.status, body: deepEqual(original.body, final.body) ? exposed.body : JSON.stringify(final.body) };
+    if (deepEqual(original.body, final.body)) return { kind: "continue", status: final.status, body: exposed.body };
+    settleContentType(run.headers, "json", original.headers, final.headers);
+    return { kind: "continue", status: final.status, body: JSON.stringify(final.body) };
   } catch (e) {
     return failure(lease.entries[0]?.row.name ?? "", messageOf(e));
   }
@@ -270,12 +278,11 @@ function failure(policy: string, message: string): PolicyStop {
 /** Returns undefined when a needed JSON body does not parse. */
 function exposeBody(lease: PolicyLease, run: RequestRun): Exposed | undefined {
   const { request, carrier } = run;
-  const length = request.headers.get("content-length");
-  if (request.method === "GET" || request.method === "HEAD" || length === "0" || request.body === null) return { value: undefined };
+  if (request.method === "GET" || request.method === "HEAD" || run.bytes === 0) return { value: undefined };
   if (!lease.needs("body")) return { value: undefined, skipped: "not_requested" };
   const kind = bodyMediaKind(request.headers.get("content-type"));
   if (!kind) return { value: undefined, skipped: "unparsed" };
-  if (length === null || !/^\d+$/.test(length) || Number(length) > MAX_BODY_BYTES) return { value: undefined, skipped: "too_large" };
+  if (run.bytes > MAX_BODY_BYTES) return { value: undefined, skipped: "too_large" };
   if (carrier.body?.kind === "json") return { value: carrier.body.value, kind: "json" };
   if (carrier.body?.kind === "form") return { value: firstValues(carrier.body.value), kind: "form" };
   const text = new TextDecoder().decode(run.raw);
@@ -312,8 +319,8 @@ async function exposeResponseBody(lease: PolicyLease, run: ResponseRun): Promise
   const passThrough = (skipped: BodySkipped, body: ResponseBody = response.body): ExposedResponse => ({ value: undefined, skipped, empty: false, body });
   if (!lease.needs("responseBody")) return passThrough("not_requested");
   if (bodyMediaKind(response.headers.get("content-type")) !== "json") return passThrough("unparsed");
-  if (length === null || !/^\d+$/.test(length) || Number(length) > MAX_BODY_BYTES) return passThrough("too_large");
-  // Content-Length counts encoded bytes; the cap also bounds what decompression produces.
+  if (length !== null && (!/^\d+$/.test(length) || Number(length) > MAX_BODY_BYTES)) return passThrough("too_large");
+  // Content-Length, when present, counts encoded bytes; the cap applies to the decoded body.
   const read = await readCapped(response.body, MAX_BODY_BYTES);
   if (read instanceof ReadableStream) return passThrough("too_large", read);
   try {
@@ -370,57 +377,73 @@ function checkResponseStep(run: ResponseRun, exposed: ExposedResponse, before: P
   return undefined;
 }
 
-/** Writes the chain's result into the carrier; returns a replacement raw body when one is needed. */
-function apply(run: RequestRun, exposed: Exposed, original: PolicyRequest, final: PolicyRequest): string | undefined {
+/**
+ * Writes the chain's result into the carrier; returns a replacement raw body when one is needed.
+ * When an onRequest hook ran, the query and an exposed form body go out as the hooks saw them:
+ * one pair per key.
+ */
+function apply(run: RequestRun, exposed: Exposed, original: PolicyRequest, final: PolicyRequest, hooked: boolean): string | undefined {
   const { carrier } = run;
   if (final.path !== original.path) carrier.url = joinUrl(run.baseUrl, final.path, carrier.url.search);
-  if (!deepEqual(original.query, final.query)) carrier.url.search = editPairs(carrier.url.search.slice(1), original.query, final.query);
+  if (hooked) {
+    const search = editPairs(carrier.url.search.slice(1), original.query, final.query);
+    if (search !== carrier.url.search.slice(1)) carrier.url.search = search;
+  }
   for (const name of Object.keys(original.headers)) if (!Object.hasOwn(final.headers, name)) carrier.headers.delete(name);
   for (const [name, value] of Object.entries(final.headers)) if (original.headers[name] !== value) carrier.headers.set(name, value);
 
-  if (deepEqual(original.body, final.body)) return undefined;
   const parsed = carrier.body;
-  if (exposed.kind === "form" && isStringRecord(original.body) && isStringRecord(final.body)) {
-    const text = editPairs(parsed?.kind === "form" ? parsed.value.toString() : (exposed.text ?? ""), original.body, final.body);
+  if (parsed) settleContentType(carrier.headers, parsed.kind, original.headers, final.headers);
+  if (hooked && exposed.kind === "form" && isStringRecord(original.body) && isStringRecord(final.body)) {
+    const raw = parsed?.kind === "form" ? parsed.value.toString() : (exposed.text ?? "");
+    const text = editPairs(raw, original.body, final.body);
     if (parsed?.kind === "form") {
       parsed.value = new URLSearchParams(text);
       return undefined;
     }
-    carrier.headers.set("content-type", "application/x-www-form-urlencoded");
+    if (text === raw) return undefined;
+    settleContentType(carrier.headers, "form", original.headers, final.headers);
     return text;
   }
+  if (deepEqual(original.body, final.body)) return undefined;
   if (parsed?.kind === "json" && isRecord(final.body)) {
     parsed.value = final.body;
     return undefined;
   }
-  carrier.headers.set("content-type", "application/json");
+  settleContentType(carrier.headers, "json", original.headers, final.headers);
   return JSON.stringify(final.body);
 }
 
+/** Sets the plain content type for `kind` unless the headers already name that kind or a policy set its own. */
+function settleContentType(headers: Headers, kind: "json" | "form", before: Record<string, string>, after: Record<string, string>): void {
+  const policySet = Object.hasOwn(after, "content-type") && after["content-type"] !== before["content-type"];
+  if (policySet || bodyMediaKind(headers.get("content-type")) === kind) return;
+  headers.set("content-type", kind === "json" ? "application/json" : "application/x-www-form-urlencoded");
+}
+
 /**
- * Rewrites `key=value` pairs for the keys whose value changed between `before` and `after`. A set
- * key keeps one pair at its first position, a deleted key loses every pair, a new key is appended,
- * and every other pair is copied as sent.
+ * Rebuilds `key=value` pairs as hooks saw them. Each key keeps only its first pair: rewritten when
+ * its value changed between `before` and `after`, dropped when deleted, copied as sent otherwise.
+ * New keys are appended.
  */
 function editPairs(raw: string, before: Record<string, string>, after: Record<string, string>): string {
   const changed = new Map<string, string | undefined>();
   for (const key of Object.keys(before)) if (!Object.hasOwn(after, key)) changed.set(key, undefined);
   for (const [key, value] of Object.entries(after)) if (before[key] !== value) changed.set(key, value);
   const out: string[] = [];
-  const written = new Set<string>();
+  const seen = new Set<string>();
   for (const pair of raw.split("&")) {
     if (!pair) continue;
     const key = new URLSearchParams(pair).keys().next().value ?? "";
-    if (!changed.has(key)) {
-      out.push(pair);
-      continue;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (!changed.has(key)) out.push(pair);
+    else {
+      const value = changed.get(key);
+      if (value !== undefined) out.push(new URLSearchParams([[key, value]]).toString());
     }
-    const value = changed.get(key);
-    if (value === undefined || written.has(key)) continue;
-    out.push(new URLSearchParams([[key, value]]).toString());
-    written.add(key);
   }
-  for (const [key, value] of changed) if (value !== undefined && !written.has(key)) out.push(new URLSearchParams([[key, value]]).toString());
+  for (const [key, value] of changed) if (value !== undefined && !seen.has(key)) out.push(new URLSearchParams([[key, value]]).toString());
   return out.join("&");
 }
 

@@ -88,10 +88,12 @@ source), `policy create --file F`, `policy update <name> --file F`, `policy
 enable|disable <name>`, `policy delete <name>` (refused while any token has it
 attached; the output lists those tokens). `token policies <id>` prints the
 token's list; `token policies <id> --policy a --policy b:off` replaces it, in
-that order, with `b` attached but switched off; `--clear` detaches all. A
-compile error refuses the save with the message. A save applies to the next
-request of every attached token. `requests --policy <name>` lists the
-requests a policy denied, answered or failed.
+that order, with `b` attached but switched off; `--clear` detaches all.
+`token create` and `token update` take the same `--policy name[:off]` flags
+and set the list in the same write as the token. A compile error refuses a
+policy save with the message. A save applies to the next request of every
+attached token. `requests --policy <name>` lists the requests a policy denied,
+answered or failed.
 
     export const meta = { name: "no-big-models", needs: ["body"] };
 
@@ -126,10 +128,12 @@ string pattern and its replacement are literal.
 `onRequest` runs in attachment order and `onResponse` in reverse, on every
 provider response including errors. `req.body` is the parsed JSON or form
 fields only when `needs` has `body`, the type is JSON or urlencoded form and
-`Content-Length` is at most 1 MB; otherwise it is `undefined` and
-`ctx.bodySkipped` is `not_requested`, `unparsed` or `too_large`, and the body
-is forwarded as sent. `res.body` needs `responseBody` and a JSON response of at
-most 1 MB; streams pass through untouched.
+the body is at most 1 MB; otherwise it is `undefined` and `ctx.bodySkipped` is
+`not_requested`, `unparsed` or `too_large`, and the body is forwarded as sent.
+`res.body` needs `responseBody` and a JSON response of at most 1 MB; other
+types, SSE included, stream through untouched. `req.query` and form bodies
+hold the first value of a repeated key; when an `onRequest` hook runs, the
+provider gets only that first pair.
 
 `req.path` is the undecoded wire path after the slug. A path allowlist must
 decode it or reject `%2f`, or `/v1/chat/..%2f..%2fadmin` passes a

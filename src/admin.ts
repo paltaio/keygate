@@ -3,7 +3,7 @@ import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { allowLoginAttempt, clearLoginAttempts, clientIp, endSession, requireSession, requireUser, startSession, type AuthVariables } from "./auth.ts";
 import type { Env } from "./env.ts";
-import { MAX_SOURCE_BYTES, compilePolicy, type CompiledPolicy, type PolicyNeed } from "./policy.ts";
+import { compilePolicy, type CompiledPolicy, type PolicyNeed } from "./policy.ts";
 import {
   PLACEMENT_TYPES,
   RESERVED_SLUGS,
@@ -16,6 +16,7 @@ import {
   placeholderNames,
   secretHint,
   type Placement,
+  type PolicyListError,
   type PolicySummary,
   type ProviderKey,
   type Store,
@@ -48,7 +49,7 @@ const placement = z.object({
   value: z.string().min(1).max(4000),
 });
 
-const policySource = z.string().max(MAX_SOURCE_BYTES, `source exceeds ${MAX_SOURCE_BYTES / 1024} KB`);
+const attachments = z.array(z.object({ policy_id: z.number().int().positive(), enabled: z.boolean().default(true) })).max(100);
 
 const schemas = {
   login: z.object({ email: z.email(), password: z.string().min(1) }),
@@ -80,12 +81,11 @@ const schemas = {
     scopes: z.array(z.union([z.literal("*"), slug])).min(1),
     origins: z.array(origin).default([]),
     expires_at: isoDate.nullable().default(null),
+    policies: attachments.optional(),
   }),
-  policy: z.object({ source: policySource }),
-  policyPatch: z.object({ source: policySource.optional(), enabled: z.boolean().optional() }),
-  tokenPolicies: z.object({
-    policies: z.array(z.object({ policy_id: z.number().int().positive(), enabled: z.boolean().default(true) })).max(100),
-  }),
+  policy: z.object({ source: z.string() }),
+  policyPatch: z.object({ source: z.string().optional(), enabled: z.boolean().optional() }),
+  tokenPolicies: z.object({ policies: attachments }),
   requests: z.object({
     token_id: z.coerce.number().int().positive().optional(),
     upstream_id: z.coerce.number().int().positive().optional(),
@@ -180,7 +180,12 @@ async function compileSource(source: string): Promise<CompiledPolicy> {
 // Call with no await between this and the write, or a concurrent save can take the name in between.
 function claimName(store: Store, name: string, id: number | null): void {
   const existing = store.policyByName(name);
-  if (existing && existing.id !== id) fail(409, "name_taken", `A policy named ${name} exists`);
+  if (existing && existing.id !== id) fail(409, "name_taken", `A policy named ${name} already exists; change meta.name`);
+}
+
+function failPolicyList(result: PolicyListError): never {
+  const message = result.error === "duplicate_policy" ? "Each policy can be attached once" : "No such policy";
+  fail(400, result.error, `${message}: ${result.policy_ids.join(", ")}`, { policy_ids: result.policy_ids });
 }
 
 interface UpstreamView extends Omit<Upstream, "placements"> {
@@ -386,8 +391,10 @@ export function adminRoutes(store: Store, env: Env): Hono<{ Variables: AuthVaria
   app.get("/tokens", (c) => c.json(store.tokens().map((t) => tokenView(store, t))));
 
   app.post("/tokens", async (c) => {
-    const input = await parseBody(c, schemas.token);
-    const { id, token } = store.createToken(input, c.get("user").id);
+    const { policies, ...input } = await parseBody(c, schemas.token);
+    const result = store.createTokenWithPolicies(input, c.get("user").id, policies ?? []);
+    if (!result.ok) failPolicyList(result);
+    const { id, token } = result;
     const created = store.tokenById(id);
     if (!created) fail(404, "not_found", "Token vanished after creation");
     return c.json({ ...tokenView(store, created), token }, 201);
@@ -395,8 +402,14 @@ export function adminRoutes(store: Store, env: Env): Hono<{ Variables: AuthVaria
 
   app.patch("/tokens/:id", async (c) => {
     const id = idParam(c);
-    const input = await parseBody(c, schemas.token);
-    if (!store.updateToken(id, input)) fail(404, "not_found", "No such token");
+    const { policies, ...input } = await parseBody(c, schemas.token);
+    if (policies) {
+      const result = store.updateTokenWithPolicies(id, input, policies);
+      if (!result.ok) {
+        if (result.error === "token_not_found") fail(404, "not_found", "No such token, or it is revoked");
+        failPolicyList(result);
+      }
+    } else if (!store.updateToken(id, input)) fail(404, "not_found", "No such token");
     const updated = store.tokenById(id);
     if (!updated) fail(404, "not_found", "No such token");
     return c.json(tokenView(store, updated));
@@ -430,8 +443,7 @@ export function adminRoutes(store: Store, env: Env): Hono<{ Variables: AuthVaria
     const result = store.setTokenPolicies(id, input.policies);
     if (!result.ok) {
       if (result.error === "token_not_found") fail(404, "not_found", "No such token, or it is revoked");
-      const message = result.error === "duplicate_policy" ? "Each policy can be attached once" : "No such policy";
-      fail(400, result.error, `${message}: ${result.policy_ids.join(", ")}`, { policy_ids: result.policy_ids });
+      failPolicyList(result);
     }
     return c.json(tokenPolicyViews(store, id));
   });

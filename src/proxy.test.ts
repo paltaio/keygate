@@ -268,6 +268,26 @@ describe("proxy", () => {
     expect((await ctx.proxy(new Request("http://keygate.test/up/x", { headers: { "x-keygate-token": ctx.token } }))).status).toBe(200);
   });
 
+  test("unusable tokens get their code and message from the proxy and the directory", async () => {
+    const expired = ctx.store.createToken({ name: "e", scopes: ["up"], origins: [], expires_at: "2020-01-01T00:00:00Z" }, 1);
+    const disabled = ctx.store.createToken({ name: "d", scopes: ["up"], origins: [], expires_at: null }, 1);
+    ctx.store.setTokenEnabled(disabled.id, false);
+    const cases: [string, string, string][] = [
+      ["kg_nope", "invalid_token", "This token is unknown or revoked"],
+      [disabled.token, "disabled_token", "This token is disabled"],
+      [expired.token, "expired_token", "This token has expired"],
+    ];
+    for (const [token, code, message] of cases) {
+      const proxied = await ctx.proxy(new Request("http://keygate.test/up/x", { headers: { "x-keygate-token": token } }));
+      const listed = serveDirectory(ctx.store, env, new Request("http://keygate.test/llms.txt", { headers: { "x-keygate-token": token } }));
+      for (const res of [proxied, listed]) {
+        expect(res.status).toBe(401);
+        expect(await res.json()).toEqual({ error: code, message });
+      }
+    }
+    expect(ctx.store.requests({ limit: 3 }).map((r) => r.token_id)).toEqual([expired.id, disabled.id, null]);
+  });
+
   test("round robin takes turns and sits out a flagged credential", async () => {
     let status = 200;
     const c = setup(apiKeyHeader, () => new Response("x", { status }));
@@ -359,11 +379,11 @@ describe("request policies", () => {
   test("a policy that returns nothing leaves the request as sent", async () => {
     const c = setup(apiKeyHeader);
     await attach(c, [hook("noop", "", ["body"])]);
-    const res = await call(c, "/x?b=%7E&a=1&b=2", { headers: json, body: '{ "a" : 1 }' });
+    const res = await call(c, "/x?b=%7E&a=1", { headers: json, body: '{ "a" : 1 }' });
     expect(res.status).toBe(200);
     await res.text();
     const sent = c.captured[0];
-    expect(sent?.url).toBe("https://up.example/base/x?b=%7E&a=1&b=2");
+    expect(sent?.url).toBe("https://up.example/base/x?b=%7E&a=1");
     expect(sent?.body).toBe('{ "a" : 1 }');
     expect(sent?.headers.get("x-api-key")).toBe("REAL");
     expect(c.store.requests({ limit: 1 })[0]).toMatchObject({ status: 200, error: null, policy: null });
@@ -423,7 +443,7 @@ describe("request policies", () => {
     await attach(c, [hook("query", `req.headers["x-a"] = req.query.a; req.query.b = "9"; delete req.query.d; req.query.e = "new value";`)]);
     await call(c, "/x?a=1&b=2&a=3&c=%7E&d=4&d=5");
     expect(c.captured[0]?.headers.get("x-a")).toBe("1");
-    expect(c.captured[0]?.url).toBe("https://up.example/base/x?a=1&b=9&a=3&c=%7E&e=new+value");
+    expect(c.captured[0]?.url).toBe("https://up.example/base/x?a=1&b=9&c=%7E&e=new+value");
   });
 
   test("form fields are edited one by one", async () => {
@@ -432,8 +452,66 @@ describe("request policies", () => {
     await call(c, "/x", { headers: form, body: "a=1&b=2&a=3&c=x%20y" });
     const sent = c.captured[0];
     expect(sent?.headers.get("x-a")).toBe("1");
-    expect(sent?.body).toBe("a=1&b=9&a=3&c=x%20y");
+    expect(sent?.body).toBe("a=1&b=9&c=x%20y");
     expect(sent?.headers.get("content-type")).toBe("application/x-www-form-urlencoded");
+  });
+
+  test("repeated query keys go out as the first pair, the one the policy saw", async () => {
+    const c = setup(apiKeyHeader);
+    await attach(c, [hook("models", `if (match(req.query.model, "gpt-4")) return deny(403, "Model not allowed");`)]);
+    expect((await call(c, "/x?model=gpt-4&model=ok")).status).toBe(403);
+    expect((await call(c, "/x?model=ok&n=%7E&model=gpt-4&n=2")).status).toBe(200);
+    expect(c.captured.map((s) => s.url)).toEqual(["https://up.example/base/x?model=ok&n=%7E"]);
+
+    const other = c.store.createToken({ name: "o", scopes: ["up"], origins: [], expires_at: null }, 1);
+    await attach(c, [responseHook("response-only", "")], other.id);
+    await call(c, "/x?model=ok&model=gpt-4", { token: other.token });
+    expect(c.captured[1]?.url).toBe("https://up.example/base/x?model=ok&model=gpt-4");
+  });
+
+  test("repeated form keys go out as the first pair; JSON bodies keep duplicate keys", async () => {
+    const policy = hook("models", `if (match(req.body?.model, "gpt-4")) return deny(403, "Model not allowed");`, ["body"]);
+    const c = setup(apiKeyHeader);
+    await attach(c, [policy]);
+    expect((await call(c, "/x", { headers: form, body: "model=gpt-4&model=ok" })).status).toBe(403);
+    expect((await call(c, "/x", { headers: form, body: "model=ok&n=%7E&model=gpt-4" })).status).toBe(200);
+    expect((await call(c, "/x", { headers: form, body: "model=ok&n=1" })).status).toBe(200);
+    expect((await call(c, "/x", { headers: json, body: '{"model":"ok","n":1,"n":2}' })).status).toBe(200);
+    expect(c.captured.map((s) => s.body)).toEqual(["model=ok&n=%7E", "model=ok&n=1", '{"model":"ok","n":1,"n":2}']);
+
+    const placed = setup([{ type: "form", name: "api_key", value: "{{key}}" }]);
+    await attach(placed, [policy]);
+    expect((await call(placed, "/x", { token: null, headers: form, body: `api_key=${placed.token}&model=gpt-4&model=ok` })).status).toBe(403);
+    expect((await call(placed, "/x", { token: null, headers: form, body: `api_key=${placed.token}&model=ok&model=gpt-4` })).status).toBe(200);
+    expect(placed.captured.map((s) => s.body)).toEqual(["model=ok&api_key=REAL"]);
+  });
+
+  test("a rewritten body keeps its media type unless no longer named", async () => {
+    const edit = hook(
+      "retype",
+      `if (req.headers["x-mode"] === "own") req.headers["content-type"] = "text/plain";
+      if (req.headers["x-mode"] === "drop") delete req.headers["content-type"];
+      req.body.a = typeof req.body.a === "string" ? "2" : 2;`,
+      ["body"],
+    );
+    const c = setup(apiKeyHeader);
+    await attach(c, [edit]);
+    const cases: [Record<string, string>, string, string][] = [
+      [{ "content-type": "application/vnd.api+json; charset=utf-8" }, '{"a":1}', "application/vnd.api+json; charset=utf-8"],
+      [{ ...json, "x-mode": "own" }, '{"a":1}', "text/plain"],
+      [{ ...json, "x-mode": "drop" }, '{"a":1}', "application/json"],
+      [{ "content-type": "application/x-www-form-urlencoded; charset=utf-8" }, "a=1", "application/x-www-form-urlencoded; charset=utf-8"],
+      [{ ...form, "x-mode": "drop" }, "a=1", "application/x-www-form-urlencoded"],
+    ];
+    for (const [headers, body] of cases) expect((await call(c, "/x", { headers, body })).status).toBe(200);
+    expect(c.captured.map((s) => s.headers.get("content-type"))).toEqual(cases.map(([, , type]) => type));
+    expect(c.captured.map((s) => s.body)).toEqual(['{"a":2}', '{"a":2}', '{"a":2}', "a=2", "a=2"]);
+
+    const placed = setup([{ type: "json", name: "api_key", value: "{{key}}" }]);
+    await attach(placed, [edit]);
+    await call(placed, "/x", { headers: { "content-type": "application/problem+json" }, body: '{"a":1}' });
+    await call(placed, "/x", { headers: { ...json, "x-mode": "own" }, body: '{"a":1}' });
+    expect(placed.captured.map((s) => s.headers.get("content-type"))).toEqual(["application/problem+json", "text/plain"]);
   });
 
   test("path rewrites stay under the base URL", async () => {
@@ -643,9 +721,11 @@ describe("request policies", () => {
       }
     });
 
-    test("bodies over 1 MB or without a Content-Length are too_large and pass through", async () => {
+    test("the 1 MB limit counts the bytes read; larger bodies are too_large and pass through", async () => {
       const c = setup(apiKeyHeader);
       await attach(c, [report]);
+      const big = JSON.stringify({ pad: "\u00e9".repeat(600_000) });
+      await call(c, "/x", { headers: json, body: big });
       await call(c, "/x", { headers: { ...json, "content-length": String(2 * 1024 * 1024) }, body: '{"a":1}' });
       const stream = new ReadableStream<Uint8Array>({
         start(controller) {
@@ -654,9 +734,10 @@ describe("request policies", () => {
         },
       });
       await c.proxy(new Request("http://keygate.test/up/x", { method: "POST", headers: { ...json, "x-keygate-token": c.token }, body: stream }));
-      expect(c.captured.map((s) => [s.headers.get("x-skipped"), s.headers.get("x-body"), s.body])).toEqual([
-        ["too_large", "none", '{"a":1}'],
-        ["too_large", "none", '{"b":2}'],
+      expect(c.captured.map((s) => [s.headers.get("x-skipped"), s.headers.get("x-body"), s.body === big ? "big" : s.body])).toEqual([
+        ["too_large", "none", "big"],
+        ["undefined", '{"a":1}', '{"a":1}'],
+        ["undefined", '{"b":2}', '{"b":2}'],
       ]);
     });
 
@@ -826,8 +907,8 @@ describe("response policies", () => {
 
   test("JSON over 1 MB, declared or actual, is too_large and passes through", async () => {
     const big = JSON.stringify({ pad: "x".repeat(1024 * 1024) });
-    let declared = String(Buffer.byteLength(big));
-    const c = setup(apiKeyHeader, () => new Response(big, { headers: { "content-type": "application/json", "content-length": declared } }));
+    let declared: string | null = String(Buffer.byteLength(big));
+    const c = setup(apiKeyHeader, () => new Response(declared === null ? new Blob([big]).stream() : big, { headers: { "content-type": "application/json", ...(declared === null ? {} : { "content-length": declared }) } }));
     await attach(c, [responseHook("size", `res.headers["x-skipped"] = String(ctx.bodySkipped);`, ["responseBody"])]);
     const declaredLarge = await call(c, "/x");
     expect(declaredLarge.headers.get("x-skipped")).toBe("too_large");
@@ -836,6 +917,42 @@ describe("response policies", () => {
     const actualLarge = await call(c, "/x");
     expect(actualLarge.headers.get("x-skipped")).toBe("too_large");
     expect(await actualLarge.text()).toBe(big);
+    declared = null;
+    const undeclared = await call(c, "/x");
+    expect(undeclared.headers.get("x-skipped")).toBe("too_large");
+    expect(await undeclared.text()).toBe(big);
+  });
+
+  test("a compressed JSON response without Content-Length is exposed", async () => {
+    const c = setup(apiKeyHeader, () => new Response(new Blob(['{"a":1}']).stream(), { headers: { "content-type": "application/json", "content-encoding": "gzip" } }));
+    await attach(c, [responseHook("look", `res.headers["x-skipped"] = String(ctx.bodySkipped); res.body.b = res.body.a + 1;`, ["responseBody"])]);
+    const res = await call(c, "/x");
+    expect(res.headers.get("x-skipped")).toBe("undefined");
+    expect(res.headers.has("content-encoding")).toBe(false);
+    expect(await res.json()).toEqual({ a: 1, b: 2 });
+  });
+
+  test("a rewritten response body keeps its media type unless no longer named", async () => {
+    let type = "application/vnd.api+json; charset=utf-8";
+    const c = setup(apiKeyHeader, () => jsonResponse('{"a":1}', 200, { "content-type": type }));
+    await attach(
+      c,
+      [
+        responseHook(
+          "retype",
+          `if (ctx.method === "PUT") res.headers["content-type"] = "text/plain";
+          if (ctx.method === "DELETE") delete res.headers["content-type"];
+          res.body.a = 2;`,
+          ["responseBody"],
+        ),
+      ],
+    );
+    const kept = await call(c, "/x");
+    expect(kept.headers.get("content-type")).toBe("application/vnd.api+json; charset=utf-8");
+    expect(await kept.text()).toBe('{"a":2}');
+    type = "application/json";
+    expect((await call(c, "/x", { method: "PUT" })).headers.get("content-type")).toBe("text/plain");
+    expect((await call(c, "/x", { method: "DELETE" })).headers.get("content-type")).toBe("application/json");
   });
 
   test("a response without a body has no bodySkipped", async () => {

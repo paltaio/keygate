@@ -1,7 +1,7 @@
 import { useState, type ReactNode } from "react";
 import { useLocation } from "wouter";
 import { api, type CreatedToken, type Token, type TokenPolicy } from "../api.ts";
-import { errorMessage, formatDate, formatDateTime, formatRelative, isPast } from "../format.ts";
+import { formatDate, formatDateTime, formatRelative, isPast } from "../format.ts";
 import { useAction, useLoad } from "../hooks.ts";
 import { Button, ConfirmDialog, CopyButton, InkBlock, LinkButton, LoadError, Mono, Notice, PageHeader, Panel, Pill, TableMessage, TextLink } from "../ui.tsx";
 import TokenForm from "./TokenForm.tsx";
@@ -212,14 +212,9 @@ export function TokensPage() {
   );
 }
 
-function CreatedTokenPanel({ created, title, actions, warning }: { created: CreatedToken; title: string; actions: ReactNode; warning?: string | null | undefined }) {
+function CreatedTokenPanel({ created, title, actions }: { created: CreatedToken; title: string; actions: ReactNode }) {
   return (
     <Panel title={title}>
-      {warning ? (
-        <Notice kind="error" className="mb-4">
-          {warning}
-        </Notice>
-      ) : null}
       <Notice kind="info" className="mb-4">
         Copy the token now. It is shown this once and cannot be retrieved later; rotate the token if it is lost.
       </Notice>
@@ -238,7 +233,6 @@ function CreatedTokenPanel({ created, title, actions, warning }: { created: Crea
 
 export function NewTokenPage() {
   const [created, setCreated] = useState<CreatedToken | null>(null);
-  const [policyError, setPolicyError] = useState<string | null>(null);
   if (created) {
     return (
       <>
@@ -246,7 +240,6 @@ export function NewTokenPage() {
         <CreatedTokenPanel
           created={created}
           title={`Token "${created.name}" created`}
-          warning={policyError ? `The token was created without its policies: ${policyError}. Attach them with Edit on the tokens page.` : null}
           actions={
             <>
               <LinkButton href="/tokens" variant="primary">
@@ -265,18 +258,8 @@ export function NewTokenPage() {
       <Panel>
         <TokenForm
           submitLabel="Create token"
-          onSubmit={async (input, policies) => {
-            const token = await api.tokens.create(input);
-            let failed: string | null = null;
-            if (policies?.length) {
-              try {
-                await api.tokens.setPolicies(token.id, policies);
-              } catch (e) {
-                failed = errorMessage(e);
-              }
-            }
-            setPolicyError(failed);
-            setCreated(token);
+          onSubmit={async (input) => {
+            setCreated(await api.tokens.create(input));
           }}
         />
       </Panel>
@@ -321,9 +304,8 @@ export function EditTokenPage({ id }: { id: number }) {
         <TokenForm
           initial={token}
           submitLabel="Save changes"
-          onSubmit={async (input, policies) => {
+          onSubmit={async (input) => {
             await api.tokens.update(id, input);
-            if (policies) await api.tokens.setPolicies(id, policies);
             navigate("/tokens");
           }}
         />

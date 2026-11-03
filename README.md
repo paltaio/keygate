@@ -98,14 +98,18 @@ export function onResponse(res) {
 - `onRequest` runs in the token's attachment order, `onResponse` in reverse on
   every provider response. The first deny or respond stops the chain.
 - The request body is parsed only when a policy needs `body`, the type is JSON
-  or urlencoded form, and `Content-Length` is at most 1 MB. Otherwise
-  `req.body` is `undefined`, `ctx.bodySkipped` says why, and the body is
-  forwarded as sent. Response bodies follow the same rule with `responseBody`
-  and JSON; streams pass through untouched.
+  or urlencoded form, and the body is at most 1 MB. Otherwise `req.body` is
+  `undefined`, `ctx.bodySkipped` says why, and the body is forwarded as sent.
+  Response bodies follow the same rule with `responseBody` and JSON; other
+  types, SSE included, stream through untouched.
+- `req.query` and form bodies hold the first value of a repeated key. When an
+  `onRequest` hook runs, the provider gets only that first pair of each key.
 - Each hook call gets 50 ms and each policy 16 MB. Module-level variables may
   persist between calls or reset at any time.
 - A save applies to the next request. Disabled policies and switched-off
   attachments are skipped.
+- `POST` and `PATCH /api/tokens` take `policies: [{ policy_id, enabled }]` and
+  write the list with the token; `PUT /api/tokens/:id/policies` replaces it.
 
 Clients see a deny as `{"error":"policy_denied","policy":"<name>","message":"..."}`
 with the deny status, and `respond()` as the response the policy built. A
