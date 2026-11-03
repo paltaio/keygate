@@ -1,7 +1,11 @@
 import { Scope, getQuickJS, type QuickJSContext, type QuickJSHandle, type QuickJSRuntime, type QuickJSWASMModule } from "quickjs-emscripten";
 
 export const MAX_SOURCE_BYTES = 100 * 1024;
-const HOOK_DEADLINE_MS = 50;
+/** Time for one guarded step, before the per-MB allowance. Loading a module gets exactly this. */
+const STEP_BASE_MS = 50;
+const STEP_MS_PER_MB = 100;
+/** Hook time all policies of one request share, across both phases. */
+export const REQUEST_HOOK_BUDGET_MS = 500;
 export const MEMORY_LIMIT_BYTES = 16 * 1024 * 1024;
 const STACK_LIMIT_BYTES = 512 * 1024;
 const MESSAGE_MAX = 200;
@@ -51,6 +55,11 @@ export interface PolicyInfo {
 
 export interface CompiledPolicy extends PolicyInfo {
   js: string;
+}
+
+/** Hook time left for one request; every guarded step of every hook call draws from it. */
+export class HookBudget {
+  remainingMs = REQUEST_HOOK_BUDGET_MS;
 }
 
 export type CompileResult = { ok: true; policy: CompiledPolicy } | { ok: false; message: string };
@@ -203,14 +212,14 @@ export class Policy implements PolicyInfo {
     this.onResponse = sandbox.info.onResponse;
   }
 
-  runRequest(req: PolicyRequest, ctx: PolicyContext): PolicyDecision<PolicyRequest> {
+  runRequest(req: PolicyRequest, ctx: PolicyContext, budget = new HookBudget()): PolicyDecision<PolicyRequest> {
     if (!this.onRequest) return { kind: "continue", value: req };
-    return this.run("onRequest", req, ctx, (v) => requestValue(v, req.method));
+    return this.run("onRequest", req, ctx, budget, (v) => requestValue(v, req.method));
   }
 
-  runResponse(res: PolicyResponse, ctx: PolicyContext): PolicyDecision<PolicyResponse> {
+  runResponse(res: PolicyResponse, ctx: PolicyContext, budget = new HookBudget()): PolicyDecision<PolicyResponse> {
     if (!this.onResponse) return { kind: "continue", value: res };
-    return this.run("onResponse", res, ctx, responseValue);
+    return this.run("onResponse", res, ctx, budget, responseValue);
   }
 
   dispose(): void {
@@ -219,11 +228,11 @@ export class Policy implements PolicyInfo {
     this.broken = "policy is disposed";
   }
 
-  private run<T>(hook: "onRequest" | "onResponse", subject: T, ctx: PolicyContext, value: (v: Json | undefined) => T): PolicyDecision<T> {
+  private run<T>(hook: "onRequest" | "onResponse", subject: T, ctx: PolicyContext, budget: HookBudget, value: (v: Json | undefined) => T): PolicyDecision<T> {
     const sandbox = this.sandbox ?? this.rebuild();
     if (!sandbox) return { kind: "error", message: truncate(this.broken ?? "policy is unavailable") };
     try {
-      const out = sandbox.call(hook, JSON.stringify(subject), JSON.stringify(ctx));
+      const out = sandbox.call(hook, JSON.stringify(subject), JSON.stringify(ctx), budget);
       // An async hook leaves queued jobs that never run; drop them with the runtime.
       if (out.reset || sandbox.runtime.hasPendingJob()) {
         sandbox.dispose();
@@ -267,8 +276,9 @@ class Sandbox {
     this.runtime = qjs.newRuntime();
     this.runtime.setMemoryLimit(MEMORY_LIMIT_BYTES);
     this.runtime.setMaxStackSize(STACK_LIMIT_BYTES);
+    // A deadline of 0 outside a guarded step interrupts at once.
     this.runtime.setInterruptHandler(() => {
-      if (Date.now() <= this.deadline) return false;
+      if (performance.now() <= this.deadline) return false;
       this.interrupted = true;
       return true;
     });
@@ -295,13 +305,15 @@ class Sandbox {
     }
   }
 
-  call(hook: "onRequest" | "onResponse", input: string, context: string): CallResult {
+  /** Each step gets the base time plus the per-MB allowance for the serialized input, capped by `budget`. */
+  call(hook: "onRequest" | "onResponse", input: string, context: string, budget: HookBudget): CallResult {
     const fn = this.hooks[hook];
     if (!fn) return { ok: false, message: `${hook} is not defined`, reset: false };
+    const limit = { ms: stepLimitMs(Buffer.byteLength(input) + Buffer.byteLength(context)), budget };
     try {
-      this.callStep(this.prepare, [input, context]).dispose();
-      this.callStep(this.invoke, [fn]).dispose();
-      return { ok: true, json: this.callJson(this.collect, []), reset: false };
+      this.callStep(this.prepare, [input, context], limit).dispose();
+      this.callStep(this.invoke, [fn], limit).dispose();
+      return { ok: true, json: this.callJson(this.collect, [], limit), reset: false };
     } catch (e) {
       if (e instanceof PolicyError) return { ok: false, message: e.message, reset: e.reset };
       return { ok: false, message: messageOf(e), reset: true };
@@ -324,32 +336,54 @@ class Sandbox {
   }
 
   /** Calls a sandbox function under its own deadline; strings are passed as new sandbox strings. */
-  private callStep(fn: QuickJSHandle, args: (QuickJSHandle | string)[]): QuickJSHandle {
+  private callStep(fn: QuickJSHandle, args: (QuickJSHandle | string)[], limit?: StepLimit): QuickJSHandle {
     using scope = new Scope();
     const handles = args.map((a) => (typeof a === "string" ? scope.manage(this.vm.newString(a)) : a));
-    return this.guard(() => this.vm.callFunction(fn, this.vm.undefined, handles));
+    return this.guard(() => this.vm.callFunction(fn, this.vm.undefined, handles), limit);
   }
 
-  private callJson(fn: QuickJSHandle, args: (QuickJSHandle | string)[]): string {
-    using value = this.callStep(fn, args);
+  private callJson(fn: QuickJSHandle, args: (QuickJSHandle | string)[], limit?: StepLimit): string {
+    using value = this.callStep(fn, args, limit);
     if (this.vm.typeof(value) !== "string") throw new PolicyError("sandbox returned a non-string result");
     return this.vm.getString(value);
   }
 
-  /** Runs code under the per-call deadline and turns a sandbox exception into a PolicyError. */
-  private guard(step: () => ReturnType<QuickJSContext["evalCode"]>): QuickJSHandle {
+  /**
+   * Runs code under a deadline of `limit.ms` or the budget left, whichever is sooner, charges the
+   * time to the budget, and turns a sandbox exception into a PolicyError.
+   */
+  private guard(step: () => ReturnType<QuickJSContext["evalCode"]>, limit: StepLimit = { ms: STEP_BASE_MS }): QuickJSHandle {
+    const { ms, budget } = limit;
+    const overBudget = `exceeded the ${REQUEST_HOOK_BUDGET_MS} ms per-request policy time limit`;
+    if (budget && budget.remainingMs <= 0) throw new PolicyError(overBudget);
+    const allowed = budget ? Math.min(ms, budget.remainingMs) : ms;
     this.interrupted = false;
-    this.deadline = Date.now() + HOOK_DEADLINE_MS;
-    const result = step();
-    this.deadline = 0;
+    const started = performance.now();
+    this.deadline = started + allowed;
+    let result: ReturnType<QuickJSContext["evalCode"]>;
+    try {
+      result = step();
+    } finally {
+      this.deadline = 0;
+      if (budget) budget.remainingMs -= performance.now() - started;
+    }
     if (!result.error) return result.value;
     const thrown: unknown = this.vm.dump(result.error);
     result.error.dispose();
-    if (this.interrupted) throw new PolicyError(`exceeded the ${HOOK_DEADLINE_MS} ms time limit`);
+    if (this.interrupted) throw new PolicyError(allowed < ms ? overBudget : `exceeded the ${ms} ms time limit`);
     const message = errorMessage(thrown);
     if (/out of memory/.test(message)) throw new PolicyError(`exceeded the ${MEMORY_LIMIT_BYTES / 1024 / 1024} MB memory limit`, true);
     throw new PolicyError(message);
   }
+}
+
+interface StepLimit {
+  ms: number;
+  budget?: HookBudget;
+}
+
+function stepLimitMs(bytes: number): number {
+  return STEP_BASE_MS + Math.round((STEP_MS_PER_MB * bytes) / (1024 * 1024));
 }
 
 function errorMessage(thrown: unknown): string {

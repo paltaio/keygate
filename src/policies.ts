@@ -1,5 +1,5 @@
 import { bodyMediaKind, joinUrl, type Carrier } from "./inject.ts";
-import { isRecord, loadPolicy, messageOf, truncate, type Json, type LoadResult, type Policy, type PolicyContext, type PolicyDecision, type PolicyRequest, type PolicyResponse } from "./policy.ts";
+import { HookBudget, isRecord, loadPolicy, messageOf, truncate, type Json, type LoadResult, type Policy, type PolicyContext, type PolicyDecision, type PolicyRequest, type PolicyResponse } from "./policy.ts";
 import type { RunnablePolicy } from "./store.ts";
 
 const MAX_BODY_BYTES = 1024 * 1024;
@@ -61,6 +61,8 @@ export class PolicyCache {
 /** A token's runnable policies in attachment order, loaded once for both phases of a request. */
 export class PolicyLease implements Disposable {
   readonly entries: readonly LeasedPolicy[];
+  /** Hook time for the request, shared by onRequest and onResponse. */
+  readonly budget = new HookBudget();
   private readonly release: (entry: CacheEntry) => void;
   private released = false;
 
@@ -138,7 +140,7 @@ export async function runRequestPolicies(lease: PolicyLease, run: RequestRun): P
     original,
     (policy, value) => {
       hooked ||= policy.onRequest;
-      return policy.runRequest(value, ctx);
+      return policy.runRequest(value, ctx, lease.budget);
     },
     (before, after) => checkStep(run, exposed, before, after),
   );
@@ -198,7 +200,7 @@ async function responseChain(lease: PolicyLease, run: ResponseRun, exposed: Expo
   const result = await runChain(
     [...lease.entries].reverse(),
     original,
-    (policy, value) => policy.runResponse(value, ctx),
+    (policy, value) => policy.runResponse(value, ctx, lease.budget),
     (before, after) => checkResponseStep(run, exposed, before, after),
   );
   if (result.kind !== "continue") return result;

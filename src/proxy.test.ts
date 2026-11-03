@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import { loadEnv } from "./env.ts";
 import { PolicyCache, type PolicyLease } from "./policies.ts";
+import { POLICY_TEMPLATES } from "../web/src/policy-templates.ts";
 import { compilePolicy } from "./policy.ts";
 import { clientIp, createProxy, resolveTarget, serveDirectory } from "./proxy.ts";
 import { Store, type Placement } from "./store.ts";
@@ -1048,5 +1049,52 @@ describe("clientIp", () => {
   test("more hops than entries is null", () => {
     expect(clientIp(3, "1.1.1.1, 10.0.0.2", socket)).toBeNull();
     expect(clientIp(1, null, socket)).toBeNull();
+  });
+});
+
+describe("policy time budget", () => {
+  const busy = (name: string, ms: number, hooks: ("onRequest" | "onResponse")[] = ["onRequest"]): string =>
+    `export const meta = { name: "${name}" };\n` + hooks.map((h) => `export function ${h}() { const end = Date.now() + ${ms}; while (Date.now() < end) {} }`).join("\n");
+
+  test("a 1 MB JSON body passes the redact template", async () => {
+    const source = POLICY_TEMPLATES.find((t) => t.id === "redact-body")?.source;
+    if (!source) throw new Error("no redact-body template");
+    const c = setup(apiKeyHeader);
+    await attach(c, [source]);
+    const messages: { role: string; content: string }[] = [];
+    const line = `mail ann.lee@example.com about Project Falcon ${"lorem ipsum dolor ".repeat(50)}`;
+    while (JSON.stringify({ messages }).length < 1024 * 1024 - line.length - 64) messages.push({ role: "user", content: line });
+    const body = JSON.stringify({ messages });
+    expect(Buffer.byteLength(body)).toBeGreaterThan(1000 * 1000);
+    const res = await call(c, "/x", { headers: json, body });
+    expect(res.status).toBe(200);
+    const sent = c.captured[0]?.body ?? "";
+    expect(sent).not.toContain("@example.com");
+    expect(sent).not.toContain("Project Falcon");
+    expect(JSON.parse(sent).messages).toHaveLength(messages.length);
+  });
+
+  test("policies of one request share 500 ms; crossing it fails closed naming the running policy", async () => {
+    const c = setup(apiKeyHeader);
+    await attach(c, Array.from({ length: 30 }, (_, i) => busy(`p${i + 1}`, 20)));
+    const res = await call(c, "/x");
+    expect(res.status).toBe(500);
+    const logged = c.store.requests({ limit: 1 })[0];
+    expect(logged).toMatchObject({ status: 500, error: "policy_error" });
+    expect(await res.json()).toEqual({ error: "policy_error", policy: logged?.policy, message: "exceeded the 500 ms per-request policy time limit" });
+    // A hook here runs at least 19 ms and a successful policy under 150 ms, so the crossing lands on p4 through p27.
+    const index = Number(/^p(\d+)$/.exec(logged?.policy ?? "")?.[1]);
+    expect(index).toBeGreaterThanOrEqual(4);
+    expect(index).toBeLessThanOrEqual(27);
+    expect(c.captured).toHaveLength(0);
+  });
+
+  test("the budget spans onRequest and onResponse", async () => {
+    const c = setup(apiKeyHeader);
+    await attach(c, Array.from({ length: 15 }, (_, i) => busy(`p${i + 1}`, 20, ["onRequest", "onResponse"])));
+    const res = await call(c, "/x");
+    expect(c.captured).toHaveLength(1);
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: "policy_error", policy: expect.stringMatching(/^p\d+$/), message: "exceeded the 500 ms per-request policy time limit" });
   });
 });

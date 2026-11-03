@@ -1,7 +1,7 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { getQuickJS } from "quickjs-emscripten";
 import { BLANK_POLICY, POLICY_TEMPLATES } from "../web/src/policy-templates.ts";
-import { MAX_SOURCE_BYTES, MEMORY_LIMIT_BYTES, compilePolicy, loadPolicy, type Policy, type PolicyContext, type PolicyRequest, type PolicyResponse } from "./policy.ts";
+import { HookBudget, MAX_SOURCE_BYTES, MEMORY_LIMIT_BYTES, compilePolicy, loadPolicy, type Policy, type PolicyContext, type PolicyRequest, type PolicyResponse } from "./policy.ts";
 
 const ctx: PolicyContext = {
   token: { id: 1, name: "ci", scopes: ["openai"] },
@@ -206,6 +206,22 @@ describe("onRequest", () => {
     expect(elapsed).toBeGreaterThanOrEqual(45);
     expect(elapsed).toBeLessThan(250);
     expect(p.runRequest(request({ body: {} }), ctx)).toMatchObject({ kind: "continue", value: { headers: { ok: "1" } } });
+  });
+
+  test("the step deadline grows by 100 ms per MB of input", async () => {
+    const p = await policy(`export function onRequest(req) { while (true) {} }`);
+    const started = performance.now();
+    expect(p.runRequest(request({ body: { pad: "x".repeat(512 * 1024) } }), ctx)).toEqual({ kind: "error", message: "exceeded the 100 ms time limit" });
+    expect(performance.now() - started).toBeGreaterThanOrEqual(95);
+  });
+
+  test("hook calls draw from a shared request budget", async () => {
+    const p = await policy(`export function onRequest(req) { const end = Date.now() + 20; while (req.path === "/spin" || Date.now() < end) {} }`);
+    const budget = new HookBudget();
+    budget.remainingMs = 60;
+    expect(p.runRequest(request(), ctx, budget).kind).toBe("continue");
+    expect(budget.remainingMs).toBeLessThan(41);
+    expect(p.runRequest(request({ path: "/spin" }), ctx, budget)).toEqual({ kind: "error", message: "exceeded the 500 ms per-request policy time limit" });
   });
 
   test("deep recursion hits the stack limit", async () => {

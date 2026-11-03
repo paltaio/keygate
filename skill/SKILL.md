@@ -147,8 +147,11 @@ decode it or reject `%2f`, or `/v1/chat/..%2f..%2fadmin` passes a
 Module scope is not state: module-level variables may persist between calls
 and tokens, and may reset at any time.
 
-Each hook call has 50 ms and each policy 16 MB of memory. Any failure (throw,
-timeout, memory, an invalid return or edit) fails closed with `500
+Each step of a hook call (reading the input, running the hook, returning the
+result) has 50 ms plus 100 ms per MB of input, so 150 ms at 1 MB. All hooks of
+one request, `onRequest` and `onResponse` together, share 500 ms. Each policy
+has 16 MB of memory. Any failure (throw, timeout, memory, an invalid return or
+edit) fails closed with `500
 {"error":"policy_error","policy":"<name>","message":"..."}`. A deny answers
 `{"error":"policy_denied","policy":"<name>","message":"..."}` with its status.
 

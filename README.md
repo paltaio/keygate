@@ -109,8 +109,11 @@ export function onResponse(res) {
   complete (up to 1 MB) before the client gets it.
 - `req.query` and form bodies hold the first value of a repeated key. When an
   `onRequest` hook runs, the provider gets only that first pair of each key.
-- Each hook call gets 50 ms and each policy 16 MB. Module-level variables may
-  persist between calls or reset at any time.
+- Each step of a hook call (reading the input, running the hook, returning the
+  result) gets 50 ms plus 100 ms per MB of input, so 150 ms at 1 MB. All hooks
+  of one request, `onRequest` and `onResponse` together, share 500 ms. Each
+  policy gets 16 MB of memory. Module-level variables may persist between calls
+  or reset at any time.
 - A save applies to the next request. Disabled policies and switched-off
   attachments are skipped.
 - `POST` and `PATCH /api/tokens` take `policies: [{ policy_id, enabled }]` and
