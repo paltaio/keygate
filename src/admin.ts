@@ -1,9 +1,11 @@
 import { Hono, type Context } from "hono";
+import { getConnInfo } from "hono/bun";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
-import { allowLoginAttempt, clearLoginAttempts, clientIp, endSession, requireSession, requireUser, startSession, type AuthVariables } from "./auth.ts";
+import { allowLoginAttempt, clearLoginAttempts, endSession, requireSession, requireUser, startSession, type AuthVariables } from "./auth.ts";
 import type { Env } from "./env.ts";
 import { compilePolicy, type CompiledPolicy, type PolicyNeed } from "./policy.ts";
+import { clientIp } from "./proxy.ts";
 import {
   PLACEMENT_TYPES,
   RESERVED_SLUGS,
@@ -213,11 +215,20 @@ function upstreamView(store: Store, upstream: Upstream): UpstreamView {
   };
 }
 
+/** The socket peer address, or null when the request did not arrive through `Bun.serve`. */
+function socketAddress(c: Context): string | null {
+  try {
+    return getConnInfo(c).remote.address ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export function adminRoutes(store: Store, env: Env): Hono<{ Variables: AuthVariables }> {
   const app = new Hono<{ Variables: AuthVariables }>();
 
   app.post("/auth/login", async (c) => {
-    const ip = clientIp(c);
+    const ip = clientIp(env.KEYGATE_TRUSTED_PROXY_HOPS, c.req.header("x-forwarded-for") ?? null, () => socketAddress(c)) ?? "unknown";
     if (!allowLoginAttempt(ip)) return c.json({ error: "too_many_attempts", message: "Try again in 15 minutes" }, 429);
     const input = await parseBody(c, schemas.login);
     const user = store.userByEmail(input.email);

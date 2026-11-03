@@ -320,3 +320,35 @@ describe("admin policies", () => {
     expect(store.tokenById(token.id)?.name).toBe("renamed-2");
   });
 });
+
+describe("login throttle", () => {
+  const store = new Store(":memory:");
+  const attempt = (app: Hono, forwardedFor: string, password: string, socket?: string) =>
+    app.request(
+      "/api/auth/login",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-forwarded-for": forwardedFor },
+        body: JSON.stringify({ email: "throttle@test.local", password }),
+      },
+      socket ? { server: { requestIP: () => ({ address: socket, family: "IPv4", port: 40000 }) } } : undefined,
+    );
+
+  beforeAll(async () => {
+    store.createUser("throttle@test.local", "T", await Bun.password.hash("password123"));
+  });
+
+  test("with no trusted proxy, X-Forwarded-For does not change the key", async () => {
+    const app = new Hono().route("/api", adminRoutes(store, env));
+    for (let i = 0; i < 10; i++) expect((await attempt(app, `203.0.113.${i}`, "wrong-password", "192.0.2.10")).status).toBe(401);
+    expect((await attempt(app, "203.0.113.200", "password123", "192.0.2.10")).status).toBe(429);
+    expect((await attempt(app, "203.0.113.200", "password123", "192.0.2.11")).status).toBe(200);
+  });
+
+  test("with one trusted proxy, the last X-Forwarded-For entry is the key", async () => {
+    const app = new Hono().route("/api", adminRoutes(store, loadEnv({ KEYGATE_TRUSTED_PROXY_HOPS: "1" })));
+    for (let i = 0; i < 10; i++) expect((await attempt(app, `203.0.113.${i}, 198.51.100.7`, "wrong-password")).status).toBe(401);
+    expect((await attempt(app, "203.0.113.200, 198.51.100.7", "password123")).status).toBe(429);
+    expect((await attempt(app, "198.51.100.7, 198.51.100.8", "password123")).status).toBe(200);
+  });
+});

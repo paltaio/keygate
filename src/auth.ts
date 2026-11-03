@@ -16,11 +16,6 @@ const LOGIN_WINDOW_MS = 15 * 60_000;
 const LOGIN_MAX_ATTEMPTS = 10;
 const attempts = new Map<string, { count: number; resetAt: number }>();
 
-export function clientIp(c: Context): string {
-  const forwarded = c.req.header("x-forwarded-for");
-  return forwarded?.split(",")[0]?.trim() || c.req.header("x-real-ip") || "local";
-}
-
 /** True when this IP may attempt a login; counts the attempt. */
 export function allowLoginAttempt(ip: string, now = Date.now()): boolean {
   const entry = attempts.get(ip);

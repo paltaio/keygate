@@ -24,7 +24,7 @@ the same service; path routing (`<host>/exa/...`) works with the bare host.
 | `KEYGATE_LOG_RETENTION_DAYS` | `30` | `0` keeps every request log row |
 | `KEYGATE_SESSION_DAYS` | `14` | |
 | `KEYGATE_UPSTREAM_TIMEOUT_MS` | `300000` | Includes streamed bodies |
-| `KEYGATE_TRUSTED_PROXY_HOPS` | `0` | Proxies in front of keygate that append to `X-Forwarded-For`; policies see the client IP that many entries from the right. `0` uses the socket address |
+| `KEYGATE_TRUSTED_PROXY_HOPS` | `0` | Proxies in front of keygate that append to `X-Forwarded-For`; policies and login throttling use the client IP that many entries from the right. `0` uses the socket address |
 
 ## Use
 
