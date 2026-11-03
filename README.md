@@ -24,7 +24,7 @@ the same service; path routing (`<host>/exa/...`) works with the bare host.
 | `KEYGATE_LOG_RETENTION_DAYS` | `30` | `0` keeps every request log row |
 | `KEYGATE_SESSION_DAYS` | `14` | |
 | `KEYGATE_UPSTREAM_TIMEOUT_MS` | `300000` | Includes streamed bodies |
-| `KEYGATE_TRUSTED_PROXY_HOPS` | `0` | Proxies in front of keygate that append to `X-Forwarded-For`; policies and login throttling use the client IP that many entries from the right. `0` uses the socket address |
+| `KEYGATE_TRUSTED_PROXY_HOPS` | `0` | Proxies that append to `X-Forwarded-For`; sets the client IP for policies and login throttling. `0` uses the socket address |
 
 ## Use
 
@@ -34,16 +34,13 @@ curl -H "X-Keygate-Token: kg_..." https://keygate.example.com/exa/search -d '{"q
 OPENAI_BASE_URL=https://openai.keygate.example.com/v1 OPENAI_API_KEY=kg_... python app.py
 ```
 
-The token is accepted in `X-Keygate-Token`, in `Authorization: Bearer`, in
-`?keygate_token=`, or wherever the upstream expects its own key. The last form
-is what makes SDKs work with only a base URL change. Browser callers must send
-an `Origin` that is on the token's origin list.
+The token goes in `X-Keygate-Token`, `Authorization: Bearer`,
+`?keygate_token=`, or wherever the upstream expects its own key. Browser
+callers need an `Origin` on the token's origin list.
 
-`GET /<slug>/llms.txt` needs no token. It lists the base URL and the token
-slots for that upstream, followed by the upstream's docs field (markdown, set
-per upstream). Notes stay private. `GET /llms.txt` on the bare host
-explains the token and, when the request carries one, lists the upstreams in
-its scope with links to their llms.txt.
+`GET /<slug>/llms.txt` needs no token and describes the upstream: base URL,
+token slots and its docs field. `GET /llms.txt` with a token lists the
+upstreams it reaches.
 
 ## Model
 
@@ -65,10 +62,10 @@ placements re-serialize it.
 
 ## Policies
 
-A policy is a TypeScript module attached to tokens. It runs on each request of
-those tokens after the token, scope and origin checks and before the
-credential is added, inside a QuickJS sandbox with no access to credentials,
-the network, files or the environment.
+A policy is a TypeScript module attached to tokens. It runs in a QuickJS
+sandbox after the token checks and before the credential is added, and can
+change the request and response or answer itself. It cannot reach
+credentials, the network, files or the environment.
 
 ```ts
 export const meta = { name: "no-big-models", needs: ["body"] };
@@ -84,46 +81,17 @@ export function onResponse(res) {
 }
 ```
 
-- `meta.name` (lowercase letters, digits, dashes) is unique and names the
-  policy. `meta.needs` may list `"body"` and `"responseBody"`.
-- `onRequest(req, ctx)` gets `{ method, path, query, headers, body }`;
-  `onResponse(res, ctx)` gets `{ status, headers, body }`. Hooks edit them in
-  place and are synchronous. `ctx` has the token, the upstream, `origin`, `ip`,
-  `method` and `bodySkipped`. `req.path` is the undecoded wire path after the
-  slug.
-- Return nothing to continue, `deny(status?, message?)` (400-499, default 403),
-  or `respond(status, headers?, body?)` to answer instead of the provider.
-- `match(value, pattern)` takes a string (exact, or a glob with `*` and `?`), a
-  RegExp, or an array of either. `replaceDeep(value, pattern, replacement)`
-  returns a copy with every match in every string leaf replaced; a string
-  pattern is literal.
-- `onRequest` runs in the token's attachment order, `onResponse` in reverse on
-  every provider response. The first deny or respond stops the chain.
-- The request body is parsed only when a policy needs `body`, the type is JSON
-  or urlencoded form, and the body is at most 1 MB. Otherwise `req.body` is
-  `undefined`, `ctx.bodySkipped` says why, and the body is forwarded as sent.
-  A JSON body that fails to parse is refused with `400 invalid_body` when a
-  policy needs the body. Response bodies follow the same rule with
-  `responseBody` and JSON; other types, SSE included, stream through
-  untouched. A `responseBody` policy holds a JSON response until it is
-  complete (up to 1 MB) before the client gets it.
-- `req.query` and form bodies hold the first value of a repeated key. When an
-  `onRequest` hook runs, the provider gets only that first pair of each key.
-- Each step of a hook call (reading the input, running the hook, returning the
-  result) gets 50 ms plus 100 ms per MB of input, so 150 ms at 1 MB. All hooks
-  of one request, `onRequest` and `onResponse` together, share 500 ms. Each
-  policy gets 16 MB of memory. Module-level variables may persist between calls
-  or reset at any time.
-- A save applies to the next request. Disabled policies and switched-off
-  attachments are skipped.
-- `POST` and `PATCH /api/tokens` take `policies: [{ policy_id, enabled }]` and
-  write the list with the token; `PUT /api/tokens/:id/policies` replaces it.
+- Return nothing to continue, `deny(status?, message?)` for
+  `{"error":"policy_denied",...}`, or `respond(status, headers?, body?)`.
+- `onRequest` runs in the token's attachment order, `onResponse` in reverse;
+  the first deny or respond stops the chain.
+- Bodies reach policies when listed in `meta.needs`, JSON or form, and at most
+  1 MB; otherwise `ctx.bodySkipped` says why.
+- Each hook step gets 50 ms plus 100 ms per MB of input, a request's hooks
+  share 500 ms, and each policy gets 16 MB. Errors and timeouts fail closed
+  with `500 policy_error`.
 
-Clients see a deny as `{"error":"policy_denied","policy":"<name>","message":"..."}`
-with the deny status, and `respond()` as the response the policy built. A
-throw, timeout, memory overrun or invalid result fails closed with `500
-{"error":"policy_error","policy":"<name>","message":"..."}`. The request log
-records the policy name on these rows.
+The full hook API is in the skill at `/docs/skill.md`.
 
 ## Admin API
 
