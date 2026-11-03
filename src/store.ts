@@ -1,4 +1,5 @@
 import { Database } from "bun:sqlite";
+import { POLICY_NEEDS, type PolicyNeed } from "./policy.ts";
 
 export const PLACEMENT_TYPES = ["header", "query", "cookie", "json", "form"] as const;
 export type PlacementType = (typeof PLACEMENT_TYPES)[number];
@@ -96,6 +97,46 @@ export interface RequestLog {
   bytes_out: number | null;
   origin: string | null;
   error: string | null;
+  /** Name of the policy that denied, answered, or failed the request. */
+  policy: string | null;
+}
+
+export interface StoredPolicy {
+  id: number;
+  name: string;
+  source: string;
+  /** Type-stripped module the sandbox loads. */
+  compiled: string;
+  /** JSON array of PolicyNeed. */
+  needs: string;
+  enabled: number;
+  created_by: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export type PolicySummary = Omit<StoredPolicy, "source" | "compiled"> & { token_count: number };
+
+/** One entry of a token's attachment list; `enabled` is the attachment's own switch. */
+export interface TokenPolicy {
+  policy_id: number;
+  name: string;
+  enabled: number;
+  position: number;
+}
+
+/** A policy the proxy runs for a token: both the policy and its attachment are enabled. */
+export interface RunnablePolicy {
+  id: number;
+  name: string;
+  needs: PolicyNeed[];
+  compiled: string;
+  updated_at: string;
+}
+
+export interface TokenRef {
+  id: number;
+  name: string;
 }
 
 const SCHEMA = `
@@ -177,11 +218,31 @@ CREATE TABLE IF NOT EXISTS requests (
   bytes_in INTEGER,
   bytes_out INTEGER,
   origin TEXT,
-  error TEXT
+  error TEXT,
+  policy TEXT
 );
 CREATE INDEX IF NOT EXISTS requests_ts ON requests(ts);
 CREATE INDEX IF NOT EXISTS requests_token ON requests(token_id, ts);
 CREATE INDEX IF NOT EXISTS requests_upstream ON requests(upstream_id, ts);
+CREATE TABLE IF NOT EXISTS policies (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  source TEXT NOT NULL,
+  compiled TEXT NOT NULL,
+  needs TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS token_policies (
+  token_id INTEGER NOT NULL REFERENCES tokens(id) ON DELETE CASCADE,
+  policy_id INTEGER NOT NULL REFERENCES policies(id),
+  position INTEGER NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  PRIMARY KEY (token_id, policy_id)
+);
+CREATE INDEX IF NOT EXISTS token_policies_policy ON token_policies(policy_id);
 `;
 
 /** Columns added after the first release; applied to databases created before them. */
@@ -192,6 +253,7 @@ const ADDED_COLUMNS: Array<[table: string, column: string, ddl: string]> = [
   ["tokens", "rotated_at", "TEXT"],
   ["api_keys", "rotated_at", "TEXT"],
   ["upstreams", "docs", "TEXT NOT NULL DEFAULT ''"],
+  ["requests", "policy", "TEXT"],
 ];
 
 export const RESERVED_SLUGS = new Set(["admin", "api", "health", "assets", "docs"]);
@@ -249,15 +311,40 @@ export interface RequestLogInput {
   bytes_out: number | null;
   origin: string | null;
   error: string | null;
+  policy?: string | null | undefined;
 }
 
 export interface RequestFilter {
   token_id?: number | undefined;
   upstream_id?: number | undefined;
+  /** Exact policy name. */
+  policy?: string | undefined;
   status?: "ok" | "client_error" | "upstream_error" | "proxy_error" | undefined;
   before?: number | undefined;
   limit: number;
 }
+
+export interface PolicyInput {
+  name: string;
+  source: string;
+  compiled: string;
+  needs: PolicyNeed[];
+}
+
+export interface TokenPolicyInput {
+  policy_id: number;
+  enabled: boolean;
+}
+
+export type PolicyDeleteResult =
+  | { status: "deleted" }
+  | { status: "not_found" }
+  | { status: "in_use"; tokens: TokenRef[] };
+
+export type SetTokenPoliciesResult =
+  | { ok: true }
+  | { ok: false; error: "token_not_found" }
+  | { ok: false; error: "unknown_policy" | "duplicate_policy"; policy_ids: number[] };
 
 export interface UpstreamStat {
   upstream_id: number | null;
@@ -554,12 +641,17 @@ export class Store {
     return changed > 0 ? token : null;
   }
 
+  /** Revoking also detaches every policy from the token. */
   revokeToken(id: number): boolean {
-    return (
-      this.db
-        .query<never, [string, number]>("UPDATE tokens SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL")
-        .run(now(), id).changes > 0
-    );
+    const run = this.db.transaction((): boolean => {
+      const revoked =
+        this.db
+          .query<never, [string, number]>("UPDATE tokens SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL")
+          .run(now(), id).changes > 0;
+      if (revoked) this.db.query<never, [number]>("DELETE FROM token_policies WHERE token_id = ?").run(id);
+      return revoked;
+    });
+    return run();
   }
 
   setTokenEnabled(id: number, enabled: boolean): boolean {
@@ -631,13 +723,126 @@ export class Store {
     this.db.query<never, [string, number]>("UPDATE api_keys SET last_used_at = ? WHERE id = ?").run(now(), id);
   }
 
+  // Policies
+
+  policies(): PolicySummary[] {
+    return this.db
+      .query<PolicySummary, []>(
+        `SELECT p.id, p.name, p.needs, p.enabled, p.created_by, p.created_at, p.updated_at,
+                (SELECT COUNT(*) FROM token_policies tp WHERE tp.policy_id = p.id) AS token_count
+         FROM policies p ORDER BY p.name`,
+      )
+      .all();
+  }
+
+  policyById(id: number): StoredPolicy | null {
+    return this.db.query<StoredPolicy, [number]>("SELECT * FROM policies WHERE id = ?").get(id);
+  }
+
+  policyByName(name: string): StoredPolicy | null {
+    return this.db.query<StoredPolicy, [string]>("SELECT * FROM policies WHERE name = ?").get(name);
+  }
+
+  createPolicy(input: PolicyInput, createdBy: number): number {
+    const ts = now();
+    const result = this.db
+      .query<never, [string, string, string, string, number, string, string]>(
+        `INSERT INTO policies (name, source, compiled, needs, created_by, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(input.name, input.source, input.compiled, JSON.stringify(input.needs), createdBy, ts, ts);
+    return Number(result.lastInsertRowid);
+  }
+
+  updatePolicy(id: number, input: PolicyInput): boolean {
+    // updated_at keys the proxy's compiled-policy cache, so every update must move it forward,
+    // even two updates within the same millisecond.
+    return (
+      this.db
+        .query<never, [string, string, string, string, string, number]>(
+          `UPDATE policies SET name = ?1, source = ?2, compiled = ?3, needs = ?4,
+             updated_at = CASE WHEN ?5 > updated_at THEN ?5
+                               ELSE strftime('%Y-%m-%dT%H:%M:%fZ', updated_at, '+0.001 seconds') END
+           WHERE id = ?6`,
+        )
+        .run(input.name, input.source, input.compiled, JSON.stringify(input.needs), now(), id).changes > 0
+    );
+  }
+
+  setPolicyEnabled(id: number, enabled: boolean): boolean {
+    return (
+      this.db.query<never, [number, number]>("UPDATE policies SET enabled = ? WHERE id = ?").run(enabled ? 1 : 0, id).changes > 0
+    );
+  }
+
+  /** Refuses while any token has the policy attached, enabled or not. */
+  deletePolicy(id: number): PolicyDeleteResult {
+    const run = this.db.transaction((): PolicyDeleteResult => {
+      const tokens = this.policyTokens(id);
+      if (tokens.length > 0) return { status: "in_use", tokens };
+      const deleted = this.db.query<never, [number]>("DELETE FROM policies WHERE id = ?").run(id).changes > 0;
+      return { status: deleted ? "deleted" : "not_found" };
+    });
+    return run();
+  }
+
+  /** Tokens with the policy attached, enabled or not. */
+  policyTokens(policyId: number): TokenRef[] {
+    return this.db
+      .query<TokenRef, [number]>(
+        `SELECT t.id, t.name FROM token_policies tp JOIN tokens t ON t.id = tp.token_id
+         WHERE tp.policy_id = ? ORDER BY t.id`,
+      )
+      .all(policyId);
+  }
+
+  /** The token's attachment list in run order. */
+  tokenPolicies(tokenId: number): TokenPolicy[] {
+    return this.db
+      .query<TokenPolicy, [number]>(
+        `SELECT tp.policy_id, p.name, tp.enabled, tp.position FROM token_policies tp JOIN policies p ON p.id = tp.policy_id
+         WHERE tp.token_id = ? ORDER BY tp.position`,
+      )
+      .all(tokenId);
+  }
+
+  /** Replaces the token's attachment list with `attachments` in the given order, all or nothing. */
+  setTokenPolicies(tokenId: number, attachments: readonly TokenPolicyInput[]): SetTokenPoliciesResult {
+    const ids = attachments.map((a) => a.policy_id);
+    const replace = this.db.transaction((): SetTokenPoliciesResult => {
+      const token = this.tokenById(tokenId);
+      if (!token || token.revoked_at) return { ok: false, error: "token_not_found" };
+      const duplicates = [...new Set(ids.filter((id, i) => ids.indexOf(id) !== i))];
+      if (duplicates.length > 0) return { ok: false, error: "duplicate_policy", policy_ids: duplicates };
+      const unknown = ids.filter((id) => !this.policyById(id));
+      if (unknown.length > 0) return { ok: false, error: "unknown_policy", policy_ids: unknown };
+      this.db.query<never, [number]>("DELETE FROM token_policies WHERE token_id = ?").run(tokenId);
+      const insert = this.db.query<never, [number, number, number, number]>(
+        "INSERT INTO token_policies (token_id, policy_id, position, enabled) VALUES (?, ?, ?, ?)",
+      );
+      attachments.forEach((a, position) => insert.run(tokenId, a.policy_id, position, a.enabled ? 1 : 0));
+      return { ok: true };
+    });
+    return replace();
+  }
+
+  runnablePolicies(tokenId: number): RunnablePolicy[] {
+    return this.db
+      .query<Omit<RunnablePolicy, "needs"> & { needs: string }, [number]>(
+        `SELECT p.id, p.name, p.needs, p.compiled, p.updated_at FROM token_policies tp JOIN policies p ON p.id = tp.policy_id
+         WHERE tp.token_id = ? AND tp.enabled = 1 AND p.enabled = 1 ORDER BY tp.position`,
+      )
+      .all(tokenId)
+      .map((row) => ({ ...row, needs: parseNeeds(row.needs) }));
+  }
+
   // Request log
 
   logRequest(input: RequestLogInput): void {
     this.db
-      .query<never, [string, number | null, number | null, string, string, number | null, number | null, number | null, number | null, string | null, string | null]>(
-        `INSERT INTO requests (ts, token_id, upstream_id, method, path, status, latency_ms, bytes_in, bytes_out, origin, error)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      .query<never, [string, number | null, number | null, string, string, number | null, number | null, number | null, number | null, string | null, string | null, string | null]>(
+        `INSERT INTO requests (ts, token_id, upstream_id, method, path, status, latency_ms, bytes_in, bytes_out, origin, error, policy)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         now(),
@@ -651,6 +856,7 @@ export class Store {
         input.bytes_out,
         input.origin,
         input.error,
+        input.policy ?? null,
       );
   }
 
@@ -665,13 +871,17 @@ export class Store {
       where.push("upstream_id = ?");
       params.push(filter.upstream_id);
     }
+    if (filter.policy !== undefined) {
+      where.push("policy = ?");
+      params.push(filter.policy);
+    }
     if (filter.before !== undefined) {
       where.push("id < ?");
       params.push(filter.before);
     }
     switch (filter.status) {
       case "ok":
-        where.push("status < 400");
+        where.push("status < 400 AND error IS NULL");
         break;
       case "client_error":
         where.push("status >= 400 AND status < 500 AND error IS NULL");
@@ -771,6 +981,10 @@ export class MissingSecretError extends Error {
     this.name = "MissingSecretError";
     this.secret = secret;
   }
+}
+
+export function parseNeeds(json: string): PolicyNeed[] {
+  return parseList(json).filter((n): n is PolicyNeed => POLICY_NEEDS.some((need) => need === n));
 }
 
 export function parseList(json: string): string[] {
