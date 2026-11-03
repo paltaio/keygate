@@ -1,10 +1,11 @@
+import type { Json } from "./policy.ts";
 import { TOKEN_PREFIX, renderTemplate, type Placement } from "./store.ts";
 
 export const TOKEN_HEADER = "x-keygate-token";
 export const TOKEN_QUERY = "keygate_token";
 
 export type ParsedBody =
-  | { kind: "json"; value: Record<string, unknown> }
+  | { kind: "json"; value: { [key: string]: Json } }
   | { kind: "form"; value: URLSearchParams };
 
 /** The outgoing request while the consumer token is swapped for the provider credential. */
@@ -12,6 +13,22 @@ export interface Carrier {
   url: URL;
   headers: Headers;
   body?: ParsedBody;
+}
+
+/** JSON for application/json and any +json type, form for urlencoded bodies; parameters and case ignored. */
+export function bodyMediaKind(contentType: string | null): "json" | "form" | undefined {
+  const type = (contentType ?? "").split(";")[0]?.trim().toLowerCase() ?? "";
+  if (type === "application/json" || /^[^/\s]+\/[^/\s]+\+json$/.test(type)) return "json";
+  if (type === "application/x-www-form-urlencoded") return "form";
+  return undefined;
+}
+
+export function joinUrl(base: string, path: string, search: string): URL {
+  const url = new URL(base);
+  const basePath = url.pathname.replace(/\/$/, "");
+  url.pathname = `${basePath}${path}`;
+  url.search = search;
+  return url;
 }
 
 export function isToken(value: string): boolean {

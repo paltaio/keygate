@@ -222,14 +222,14 @@ export class Policy implements PolicyInfo {
   private run<T>(hook: "onRequest" | "onResponse", subject: T, ctx: PolicyContext, value: (v: Json | undefined) => T): PolicyDecision<T> {
     const sandbox = this.sandbox ?? this.rebuild();
     if (!sandbox) return { kind: "error", message: truncate(this.broken ?? "policy is unavailable") };
-    const out = sandbox.call(hook, JSON.stringify(subject), JSON.stringify(ctx));
-    // An async hook leaves queued jobs that never run; drop them with the runtime.
-    if (out.reset || sandbox.runtime.hasPendingJob()) {
-      sandbox.dispose();
-      this.sandbox = undefined;
-    }
-    if (!out.ok) return { kind: "error", message: truncate(out.message) };
     try {
+      const out = sandbox.call(hook, JSON.stringify(subject), JSON.stringify(ctx));
+      // An async hook leaves queued jobs that never run; drop them with the runtime.
+      if (out.reset || sandbox.runtime.hasPendingJob()) {
+        sandbox.dispose();
+        this.sandbox = undefined;
+      }
+      if (!out.ok) return { kind: "error", message: truncate(out.message) };
       return decide(JSON.parse(out.json), value);
     } catch (e) {
       return { kind: "error", message: truncate(messageOf(e)) };
@@ -360,7 +360,7 @@ function errorMessage(thrown: unknown): string {
   return JSON.stringify(thrown) ?? String(thrown);
 }
 
-function messageOf(e: unknown): string {
+export function messageOf(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
@@ -369,11 +369,11 @@ function transpileError(e: unknown): string {
   return messageOf(e);
 }
 
-function truncate(message: string): string {
+export function truncate(message: string): string {
   return message.slice(0, MESSAGE_MAX);
 }
 
-function isRecord(v: unknown): v is Record<string, unknown> {
+export function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 

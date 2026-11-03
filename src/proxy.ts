@@ -1,5 +1,7 @@
 import type { Env } from "./env.ts";
-import { TOKEN_QUERY, bodyKinds, extractToken, inject, parseCookies, serializeBody, serializeCookies, type Carrier, type ParsedBody } from "./inject.ts";
+import { TOKEN_QUERY, bodyKinds, bodyMediaKind, extractToken, inject, joinUrl, parseCookies, serializeBody, serializeCookies, type Carrier, type ParsedBody } from "./inject.ts";
+import { PolicyCache, customResponse, runRequestPolicies, type PolicyStop } from "./policies.ts";
+import type { Json } from "./policy.ts";
 import { MissingSecretError, RESERVED_SLUGS, missingSecrets, parseList, parsePlacements, parseSecrets, placeholderNames, type Placement, type ProviderKey, type Store, type Token, type Upstream } from "./store.ts";
 
 /** A credential flagged by the provider sits out of the round-robin pool for this long. */
@@ -140,14 +142,6 @@ export function serveDirectory(store: Store, env: Env, req: Request): Response {
   return new Response(req.method === "HEAD" ? null : text, { headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" } });
 }
 
-function joinUrl(base: string, path: string, search: string): URL {
-  const url = new URL(base);
-  const basePath = url.pathname.replace(/\/$/, "");
-  url.pathname = `${basePath}${path}`;
-  url.search = search;
-  return url;
-}
-
 function error(status: number, code: string, message: string, extra: Record<string, string> = {}): Response {
   return Response.json({ error: code, message }, { status, headers: extra });
 }
@@ -166,16 +160,16 @@ function corsHeaders(origin: string, req: Request): Record<string, string> {
 
 async function readBody(req: Request, wants: { json: boolean; form: boolean }): Promise<{ parsed?: ParsedBody; raw?: ArrayBuffer; bytes: number }> {
   if (req.method === "GET" || req.method === "HEAD") return { bytes: 0 };
-  const contentType = req.headers.get("content-type") ?? "";
-  if (wants.json && contentType.includes("application/json")) {
+  const kind = bodyMediaKind(req.headers.get("content-type"));
+  if (wants.json && kind === "json") {
     const text = await req.text();
-    const value: unknown = text.trim() ? JSON.parse(text) : {};
+    const value: Json = text.trim() ? JSON.parse(text) : {};
     if (typeof value !== "object" || value === null || Array.isArray(value)) {
       throw new ProxyError(400, "body_not_object", "The JSON body must be an object so the key can be added to it");
     }
-    return { parsed: { kind: "json", value: value as Record<string, unknown> }, bytes: text.length };
+    return { parsed: { kind: "json", value }, bytes: text.length };
   }
-  if (wants.form && contentType.includes("application/x-www-form-urlencoded")) {
+  if (wants.form && kind === "form") {
     const text = await req.text();
     return { parsed: { kind: "form", value: new URLSearchParams(text) }, bytes: text.length };
   }
@@ -201,10 +195,11 @@ export interface ProxyOptions {
   fetch?: Fetch;
 }
 
-export function createProxy(options: ProxyOptions): (req: Request) => Promise<Response> {
+export function createProxy(options: ProxyOptions): (req: Request, ip?: string | null) => Promise<Response> {
   const { store, env } = options;
   const doFetch = options.fetch ?? fetch;
   const turns = new Map<number, number>();
+  const policies = new PolicyCache();
 
   function pickKey(upstream: Upstream, placements: Placement[]): ProviderKey | null {
     if (upstream.strategy !== "round_robin") return store.activeKey(upstream.id);
@@ -218,7 +213,7 @@ export function createProxy(options: ProxyOptions): (req: Request) => Promise<Re
     return candidates[turn % candidates.length] ?? null;
   }
 
-  return async function handle(req: Request): Promise<Response> {
+  return async function handle(req: Request, ip: string | null = null): Promise<Response> {
     const url = new URL(req.url);
     const target = resolveTarget(url, req.headers.get("host"), env.KEYGATE_HOST);
     const upstream = target ? store.upstreamBySlug(target.slug) : null;
@@ -250,7 +245,7 @@ export function createProxy(options: ProxyOptions): (req: Request) => Promise<Re
     }
 
     const started = performance.now();
-    const log = (fields: { token_id: number | null; status: number | null; bytes_in: number; bytes_out: number | null; error: string | null }): void => {
+    const log = (fields: { token_id: number | null; status: number | null; bytes_in: number; bytes_out: number | null; error: string | null; policy?: string }): void => {
       store.logRequest({
         upstream_id: upstream.id,
         method: req.method,
@@ -263,6 +258,18 @@ export function createProxy(options: ProxyOptions): (req: Request) => Promise<Re
     const reject = (tokenId: number | null, status: number, code: string, message: string, bytesIn: number): Response => {
       log({ token_id: tokenId, status, bytes_in: bytesIn, bytes_out: null, error: code });
       return error(status, code, message, origin ? corsHeaders(origin, req) : {});
+    };
+    const stop = (tokenId: number, outcome: PolicyStop, bytesIn: number): Response => {
+      const cors = origin ? corsHeaders(origin, req) : {};
+      if (outcome.kind === "respond") {
+        const { response, bytes } = customResponse(outcome, cors);
+        log({ token_id: tokenId, status: outcome.status, bytes_in: bytesIn, bytes_out: bytes, error: "policy_response", policy: outcome.policy });
+        return response;
+      }
+      const status = outcome.kind === "deny" ? outcome.status : 500;
+      const code = outcome.kind === "deny" ? "policy_denied" : "policy_error";
+      log({ token_id: tokenId, status, bytes_in: bytesIn, bytes_out: null, error: code, policy: outcome.policy });
+      return Response.json({ error: code, policy: outcome.policy, message: outcome.message }, { status, headers: cors });
     };
 
     const headers = new Headers();
@@ -297,6 +304,29 @@ export function createProxy(options: ProxyOptions): (req: Request) => Promise<Re
       if (!origins.includes("*") && !origins.includes(origin)) return reject(token.id, 403, "origin_not_allowed", "This token does not allow requests from this origin", body.bytes);
     }
 
+    let rawBody: string | ArrayBuffer | undefined = body.raw;
+    const runnable = store.runnablePolicies(token.id);
+    if (runnable.length) {
+      const outcome = await runRequestPolicies(policies, {
+        rows: runnable,
+        request: req,
+        carrier,
+        raw: body.raw,
+        path: target.path,
+        baseUrl: upstream.base_url,
+        reservedHeaders: REQUEST_STRIP,
+        ctx: {
+          token: { id: token.id, name: token.name, scopes },
+          upstream: { slug: upstream.slug, name: upstream.name, base_url: upstream.base_url },
+          origin,
+          ip,
+        },
+      });
+      if (outcome.kind === "invalid_body") return reject(token.id, 400, "invalid_body", "The request body could not be parsed", body.bytes);
+      if (outcome.kind !== "continue") return stop(token.id, outcome, body.bytes);
+      if (outcome.body !== undefined) rawBody = outcome.body;
+    }
+
     const key = pickKey(upstream, placements);
     if (!key && placeholderNames(placements).length) return reject(token.id, 503, "no_active_key", `${upstream.slug} has no enabled credential to use`, body.bytes);
     try {
@@ -312,8 +342,8 @@ export function createProxy(options: ProxyOptions): (req: Request) => Promise<Re
       const serialized = serializeBody(carrier.body);
       outBody = serialized.text;
       headers.set("content-type", serialized.contentType);
-    } else if (body.raw && body.raw.byteLength > 0) {
-      outBody = body.raw;
+    } else if (typeof rawBody === "string" || (rawBody && rawBody.byteLength > 0)) {
+      outBody = rawBody;
     }
 
     let res: Response;
