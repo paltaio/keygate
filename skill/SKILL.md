@@ -1,6 +1,6 @@
 ---
 name: keygate
-description: "Manage keygate at {{host}}, the proxy that holds third-party API keys: list and create upstreams and their placements, add, edit, rotate, enable or revoke provider credentials, create and scope consumer tokens, and read the request log. Use when a task needs a new proxied API, a key rotation, a token for a client or machine, or an answer to why a proxied call failed. Triggers on keygate, api key proxy, rotate the key, add an upstream, proxied token, consumer token, credential pool, kg_ token, why is exa failing through keygate."
+description: "Manage keygate at {{host}}, the proxy that holds third-party API keys: list and create upstreams and their placements, add, edit, rotate, enable or revoke provider credentials, create and scope consumer tokens, write and attach request policies, and read the request log. Use when a task needs a new proxied API, a key rotation, a token for a client or machine, a rule that blocks or rewrites a token's requests, or an answer to why a proxied call failed. Triggers on keygate, api key proxy, rotate the key, add an upstream, proxied token, consumer token, credential pool, kg_ token, keygate policy, policy_denied, why is exa failing through keygate."
 requires-command: bun
 ---
 
@@ -37,9 +37,10 @@ Read first: `overview` shows requests, errors, rejections, latency and the
 credential in use per upstream for the last 24 hours. `requests --upstream
 exa --status proxy_error` explains a failing client: `missing_token`,
 `invalid_token`, `upstream_not_in_scope`, `origin_not_allowed`,
-`no_active_key`, `credential_incomplete`. `upstream <slug>` prints the
-placements, the value names a credential must hold, and every credential
-with its state.
+`no_active_key`, `credential_incomplete`, and `policy_denied`,
+`policy_response` or `policy_error` with the policy's name in the POLICY
+column. `upstream <slug>` prints the placements, the value names a
+credential must hold, and every credential with its state.
 
 Upstreams: `upstreams`, `upstream <slug>`, `upstream create <slug> --base-url
 URL --placement P [--placement P] [--strategy active|round_robin]`,
@@ -74,6 +75,73 @@ for browser callers; a token without origins refuses requests that carry an
 Origin header.
 
 `--json` on any command prints the API response for jq.
+
+## Policies
+
+A policy is a TypeScript module stored on the instance and attached to
+tokens. It runs on the requests of those tokens after the token checks and
+before keygate adds the credential, with no access to the credential, the
+`kg_` token, the network, files or the environment.
+
+Commands: `policies`, `policy <name>` (state, needs, attached tokens and the
+source), `policy create --file F`, `policy update <name> --file F`, `policy
+enable|disable <name>`, `policy delete <name>` (refused while any token has it
+attached; the output lists those tokens). `token policies <id>` prints the
+token's list; `token policies <id> --policy a --policy b:off` replaces it, in
+that order, with `b` attached but switched off; `--clear` detaches all. A
+compile error refuses the save with the message. A save applies to the next
+request of every attached token. `requests --policy <name>` lists the
+requests a policy denied, answered or failed.
+
+    export const meta = { name: "no-big-models", needs: ["body"] };
+
+    export function onRequest(req, ctx) {
+      if (ctx.bodySkipped) return deny(400, "The request body could not be checked");
+      if (match(req.body?.model, ["gpt-5*", "o3-pro"])) return deny(403, "Model not allowed");
+      req.headers["x-client"] = ctx.token.name;
+    }
+
+The module exports `meta = { name, needs? }` and `onRequest(req, ctx)`,
+`onResponse(res, ctx)` or both. `name` is lowercase letters, digits and
+dashes, unique, and is the policy's name everywhere; editing it renames the
+policy. `needs` may list `"body"` and `"responseBody"`. Hooks are
+synchronous; returning a Promise is an error.
+
+`req` is `{ method, path, query, headers, body }` and `res` is `{ status,
+headers, body }`, with lower-case header names. Edit them in place: headers,
+query keys, `body`, `req.path` (stays under the upstream's base URL) and
+`res.status`. Return nothing to continue, `deny(status?, message?)` (400-499,
+default 403) to refuse, or `respond(status, headers?, body?)` to answer
+instead of the provider; either stops the chain. `ctx` is `{ token: { id,
+name, scopes }, upstream: { slug, name, base_url }, origin, ip, method,
+bodySkipped }`.
+
+Globals: `deny`, `respond`, `match(value, pattern)` and `replaceDeep(value,
+pattern, replacement)`. A string pattern is an exact match, or a whole-string
+glob when it holds `*` or `?`; strings are never read as regexes, so pass a
+RegExp object for one. An array pattern matches when any element does.
+`replaceDeep` returns a copy with every match in every string leaf replaced; a
+string pattern and its replacement are literal.
+
+`onRequest` runs in attachment order and `onResponse` in reverse, on every
+provider response including errors. `req.body` is the parsed JSON or form
+fields only when `needs` has `body`, the type is JSON or urlencoded form and
+`Content-Length` is at most 1 MB; otherwise it is `undefined` and
+`ctx.bodySkipped` is `not_requested`, `unparsed` or `too_large`, and the body
+is forwarded as sent. `res.body` needs `responseBody` and a JSON response of at
+most 1 MB; streams pass through untouched.
+
+`req.path` is the undecoded wire path after the slug. A path allowlist must
+decode it or reject `%2f`, or `/v1/chat/..%2f..%2fadmin` passes a
+`/v1/chat/*` check.
+
+Module scope is not state: module-level variables may persist between calls
+and tokens, and may reset at any time.
+
+Each hook call has 50 ms and each policy 16 MB of memory. Any failure (throw,
+timeout, memory, an invalid return or edit) fails closed with `500
+{"error":"policy_error","policy":"<name>","message":"..."}`. A deny answers
+`{"error":"policy_denied","policy":"<name>","message":"..."}` with its status.
 
 ## Client side
 

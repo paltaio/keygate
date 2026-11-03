@@ -6,7 +6,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 const DEFAULT_ENV_FILE = join(homedir(), ".config/agents/keygate.env");
-const MULTI_FLAGS = new Set(["placement", "value", "clear", "scope", "origin"]);
+const MULTI_FLAGS = new Set(["placement", "value", "clear", "scope", "origin", "policy"]);
 const BOOLEAN_FLAGS = new Set(["json", "standby", "help"]);
 
 interface Args {
@@ -65,6 +65,12 @@ function setting(name: string): string | undefined {
 const baseUrl = (setting("KEYGATE_URL") ?? "").replace(/\/$/, "");
 const apiKey = setting("KEYGATE_API_KEY");
 
+interface ApiErrorBody {
+  error?: string;
+  message?: string;
+  tokens?: Array<{ id: number; name: string }>;
+}
+
 async function api<T>(path: string, init: { method?: string; body?: unknown; query?: Record<string, string | undefined> } = {}): Promise<T> {
   if (!baseUrl || !apiKey) fail(`Set KEYGATE_URL and KEYGATE_API_KEY in the environment or ${DEFAULT_ENV_FILE}`);
   const url = new URL(`${baseUrl}/api${path}`);
@@ -82,8 +88,9 @@ async function api<T>(path: string, init: { method?: string; body?: unknown; que
     fail(`${res.status} from ${url.pathname}: ${text.slice(0, 200)}`);
   }
   if (!res.ok) {
-    const err = data as { error?: string; message?: string };
-    fail(`${res.status} ${err.error ?? ""} ${err.message ?? ""}`.replace(/\s+/g, " ").trim());
+    const err = (data ?? {}) as ApiErrorBody;
+    const tokens = (err.tokens ?? []).map((t) => `\n  ${t.id} ${t.name}`).join("");
+    fail(`${res.status} ${err.error ?? ""} ${err.message ?? ""}`.replace(/\s+/g, " ").trim() + tokens);
   }
   return data as T;
 }
@@ -150,6 +157,22 @@ interface Token {
   enabled: number;
   last_used_at: string | null;
   created_at: string;
+  policies: Array<{ policy_id: number; name: string; enabled: boolean }>;
+}
+
+interface Policy {
+  id: number;
+  name: string;
+  needs: string[];
+  enabled: boolean;
+  token_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+interface PolicyDetail extends Policy {
+  source: string;
+  tokens: Array<{ id: number; name: string }>;
 }
 
 interface RequestRow {
@@ -163,6 +186,7 @@ interface RequestRow {
   latency_ms: number | null;
   bytes_out: number | null;
   error: string | null;
+  policy: string | null;
   origin: string | null;
 }
 
@@ -262,19 +286,50 @@ function tokenInput(base: Partial<Token>): Record<string, unknown> {
   };
 }
 
+const attachmentList = (t: Token): string => t.policies.map((p) => (p.enabled ? p.name : `${p.name}:off`)).join(",") || "-";
+
 function tokenRows(tokens: Token[]): string[][] {
   return [
-    ["ID", "NAME", "HINT", "SCOPES", "ORIGINS", "STATUS", "LAST USED"],
+    ["ID", "NAME", "HINT", "SCOPES", "ORIGINS", "POLICIES", "STATUS", "LAST USED"],
     ...tokens.map((t) => [
       String(t.id),
       t.name,
       t.hint,
       t.scopes.join(","),
       t.origins.join(",") || "-",
+      attachmentList(t),
       t.revoked_at ? "revoked" : !t.enabled ? "disabled" : t.expires_at ? `expires ${when(t.expires_at)}` : "live",
       when(t.last_used_at),
     ]),
   ];
+}
+
+async function policyByName(name: string): Promise<Policy> {
+  const list = await api<Policy[]>("/policies");
+  const found = list.find((p) => p.name === name);
+  if (!found) fail(`no policy "${name}"; run: bun keygate.ts policies`);
+  return found;
+}
+
+function policySource(): string {
+  const file = flag("file") ?? fail("--file is required");
+  return readFileSync(file, "utf8");
+}
+
+const tokenCount = (n: number): string => `${n} token${n === 1 ? "" : "s"}`;
+
+function policyText(p: PolicyDetail): string {
+  return [
+    `${p.name}  ${p.enabled ? "enabled" : "disabled"}  needs: ${p.needs.join(",") || "none"}  updated ${when(p.updated_at)}`,
+    `  tokens: ${p.tokens.map((t) => `${t.id} ${t.name}`).join(", ") || "none"}`,
+    "",
+    p.source.trimEnd(),
+  ].join("\n");
+}
+
+function attachmentText(tokenId: number, list: Token["policies"]): string {
+  if (!list.length) return `token ${tokenId} has no policies`;
+  return table([["#", "POLICY", "ATTACHMENT"], ...list.map((p, i) => [String(i + 1), p.name, p.enabled ? "on" : "off"])]);
 }
 
 const idArg = (value: string | undefined, what: string): number => {
@@ -421,7 +476,63 @@ async function run(): Promise<void> {
         emit({ ok: true }, () => `token ${id} revoked`);
         return;
       }
+      if (sub === "policies") {
+        const specs = multi("policy");
+        if (!specs.length && !multi("clear").length) {
+          const current = (await api<Token[]>("/tokens")).find((t) => t.id === id) ?? fail(`no token ${id}`);
+          emit(current.policies, () => attachmentText(id, current.policies));
+          return;
+        }
+        const ids = new Map((await api<Policy[]>("/policies")).map((p) => [p.name, p.id]));
+        const policies = specs.map((spec) => {
+          const [name = "", state, extra] = spec.split(":");
+          if (extra !== undefined || (state !== undefined && state !== "on" && state !== "off")) fail(`--policy wants name or name:off, got "${spec}"`);
+          const policyId = ids.get(name) ?? fail(`no policy "${name}"; run: bun keygate.ts policies`);
+          return { policy_id: policyId, enabled: state !== "off" };
+        });
+        const list = await api<Token["policies"]>(`/tokens/${id}/policies`, { method: "PUT", body: { policies } });
+        emit(list, () => attachmentText(id, list));
+        return;
+      }
       return fail(`unknown token command "${sub ?? ""}"`);
+    }
+    case "policies": {
+      const list = await api<Policy[]>("/policies");
+      emit(list, () =>
+        table([
+          ["NAME", "STATUS", "NEEDS", "TOKENS", "UPDATED"],
+          ...list.map((p) => [p.name, p.enabled ? "enabled" : "disabled", p.needs.join(",") || "-", String(p.token_count), when(p.updated_at)]),
+        ]),
+      );
+      return;
+    }
+    case "policy": {
+      if (sub === "create") {
+        const created = await api<PolicyDetail>("/policies", { method: "POST", body: { source: policySource() } });
+        emit(created, () => `created policy ${created.name}`);
+        return;
+      }
+      if (target === undefined) {
+        const found = await policyByName(sub ?? fail("policy needs a name"));
+        const detail = await api<PolicyDetail>(`/policies/${found.id}`);
+        emit(detail, () => policyText(detail));
+        return;
+      }
+      if (!["update", "enable", "disable", "delete"].includes(sub ?? "")) fail(`unknown policy command "${sub ?? ""}"`);
+      const current = await policyByName(target);
+      if (sub === "update") {
+        const updated = await api<PolicyDetail>(`/policies/${current.id}`, { method: "PATCH", body: { source: policySource() } });
+        emit(updated, () => `saved policy ${updated.name}, attached to ${tokenCount(updated.token_count)}`);
+        return;
+      }
+      if (sub === "enable" || sub === "disable") {
+        const updated = await api<PolicyDetail>(`/policies/${current.id}`, { method: "PATCH", body: { enabled: sub === "enable" } });
+        emit(updated, () => `policy ${updated.name} ${sub}d, attached to ${tokenCount(updated.token_count)}`);
+        return;
+      }
+      await api(`/policies/${current.id}`, { method: "DELETE" });
+      emit({ ok: true }, () => `deleted policy ${current.name}`);
+      return;
     }
     case "requests": {
       const query: Record<string, string | undefined> = {
@@ -429,13 +540,15 @@ async function run(): Promise<void> {
         limit: flag("limit"),
         before: flag("before"),
         token_id: flag("token"),
+        policy: multi("policy")[0],
       };
+      if (multi("policy").length > 1) fail("requests takes one --policy");
       if (flag("upstream")) query.upstream_id = String((await upstreamBySlug(flag("upstream") ?? "")).id);
       const [rows, upstreams] = await Promise.all([api<RequestRow[]>("/requests", { query }), api<Upstream[]>("/upstreams")]);
       const slugOf = new Map(upstreams.map((u) => [u.id, u.slug]));
       emit(rows, () =>
         table([
-          ["ID", "TIME", "UPSTREAM", "TOKEN", "METHOD", "PATH", "STATUS", "MS", "BYTES", "ERROR"],
+          ["ID", "TIME", "UPSTREAM", "TOKEN", "METHOD", "PATH", "STATUS", "MS", "BYTES", "POLICY", "ERROR"],
           ...rows.map((r) => [
             String(r.id),
             when(r.ts),
@@ -446,6 +559,7 @@ async function run(): Promise<void> {
             r.status === null ? "-" : String(r.status),
             r.latency_ms === null ? "-" : String(r.latency_ms),
             r.bytes_out === null ? "-" : String(r.bytes_out),
+            r.policy ?? "-",
             r.error ?? "",
           ]),
         ]),
@@ -480,13 +594,21 @@ tokens                                        List consumer tokens
 token create --name N --scope SLUG... [--origin O...] [--expires ISO]
 token update <id> [--name N] [--scope SLUG...] [--origin O...|--origin none] [--expires ISO|none]
 token enable|disable|rotate|revoke <id>
-requests [--upstream SLUG] [--token ID] [--status ok|client_error|upstream_error|proxy_error] [--limit N] [--before ID]
+token policies <id> [--policy NAME[:off]...] [--clear]
+policies                                      List policies
+policy <name>                                 One policy with its tokens and source
+policy create --file F
+policy update <name> --file F
+policy enable|disable|delete <name>
+requests [--upstream SLUG] [--token ID] [--policy NAME] [--status ok|client_error|upstream_error|proxy_error] [--limit N] [--before ID]
 
 --placement is type:name=template, where type is header, query, cookie, json or form and the
 template holds {{name}} where a credential value goes: "header:Authorization=Bearer {{token}}",
 "query:key={{key}}", "json:client_secret={{secret}}". Passing --placement on update replaces all.
 --value is name=VALUE, name=@file to read a file, or name=- to read stdin.
 --scope takes an upstream slug or * for all. --json prints the raw API response.
+token policies prints the token's policies; --policy replaces them in the given order, NAME:off
+attaches one switched off, and --clear detaches all.
 `);
 }
 
