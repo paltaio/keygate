@@ -3,7 +3,7 @@ import { api, type Token, type TokenPolicy, type TokenPolicyInput, type TokenWri
 import { fromLocalInput, isOrigin, toLocalInput } from "../format.ts";
 import { useAction, useLoad } from "../hooks.ts";
 import { TokenPoliciesEditor } from "../token-policies.tsx";
-import { Button, Checkbox, Field, Fieldset, Input, Notice, Radio, Textarea } from "../ui.tsx";
+import { Button, Checkbox, Field, Fieldset, Input, Mono, Notice, Radio, Textarea } from "../ui.tsx";
 
 type OriginMode = "none" | "any" | "list";
 
@@ -120,10 +120,10 @@ export default function TokenForm({ initial, submitLabel, onSubmit }: Props) {
                 key={slug}
                 id={`token-scope-${index}`}
                 label={
-                  <span className="font-mono text-[13px]">
+                  <Mono>
                     {slug}
                     {knownSlugs.includes(slug) ? "" : " (no such upstream)"}
-                  </span>
+                  </Mono>
                 }
                 checked={form.scopes.includes(slug)}
                 onChange={(e) => toggleScope(slug, e.target.checked)}

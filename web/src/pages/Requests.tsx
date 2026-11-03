@@ -47,7 +47,7 @@ function PolicyCell({ name, id }: { name: string | null; id: number | undefined 
   if (name === null) return <span className="text-content-muted">-</span>;
   if (id === undefined) return <Mono className="whitespace-nowrap">{name}</Mono>;
   return (
-    <TextLink href={`/policies/${id}`} className="font-mono text-[13px] whitespace-nowrap">
+    <TextLink href={`/policies/${id}`} mono className="whitespace-nowrap">
       {name}
     </TextLink>
   );

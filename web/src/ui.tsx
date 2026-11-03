@@ -54,9 +54,28 @@ export function LinkButton({ href, variant = "secondary", size = "md", className
   );
 }
 
-export function TextLink({ href, children, className }: { href: string; children: ReactNode; className?: string | undefined }) {
+const MONO = "font-mono text-[13px]";
+
+interface TextLinkProps {
+  href: string;
+  children: ReactNode;
+  className?: string | undefined;
+  mono?: boolean | undefined;
+  /** Opens a path outside the dashboard in a new tab. */
+  newTab?: boolean | undefined;
+}
+
+export function TextLink({ href, children, className, mono = false, newTab = false }: TextLinkProps) {
+  const classes = cx("rounded-ctl font-medium text-content-default underline decoration-border-strong underline-offset-2 hover:decoration-accent-primary", FOCUS, mono && MONO, className);
+  if (newTab) {
+    return (
+      <a href={href} target="_blank" rel="noopener" className={classes}>
+        {children}
+      </a>
+    );
+  }
   return (
-    <Link href={href} className={cx("rounded-ctl font-medium text-content-default underline decoration-border-strong underline-offset-2 hover:decoration-accent-primary", FOCUS, className)}>
+    <Link href={href} className={classes}>
       {children}
     </Link>
   );
@@ -270,7 +289,7 @@ export function Pill({ tone = "neutral", title, children }: { tone?: Tone | unde
 
 export function Mono({ children, className, title }: { children: ReactNode; className?: string | undefined; title?: string | undefined }) {
   return (
-    <code title={title} className={cx("font-mono text-[13px]", className)}>
+    <code title={title} className={cx(MONO, className)}>
       {children}
     </code>
   );

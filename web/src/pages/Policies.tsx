@@ -58,7 +58,7 @@ export function PoliciesPage() {
               data.map((p) => (
                 <tr key={p.id}>
                   <td>
-                    <TextLink href={`/policies/${p.id}`} className="font-mono text-[13px]">
+                    <TextLink href={`/policies/${p.id}`} mono>
                       {p.name}
                     </TextLink>
                   </td>
@@ -91,7 +91,7 @@ function problemOf(e: unknown): SaveProblem {
 
 interface FormProps {
   initialSource: string;
-  /** Tokens the saved policy runs for; 0 for a new policy. */
+  /** Tokens the saved policy is attached to; 0 for a new policy. */
   tokenCount: number;
   submitLabel: string;
   templates?: boolean | undefined;
@@ -148,6 +148,13 @@ function PolicyForm({ initialSource, tokenCount, submitLabel, templates = false,
           invalid={problem?.compile}
         />
       </Suspense>
+      <p className="text-sm text-content-muted">
+        Hook arguments and helpers are described at{" "}
+        <TextLink href="/docs/skill.md" mono newTab>
+          /docs/skill.md
+        </TextLink>
+        .
+      </p>
       {problem ? (
         <div id="policy-source-error">
           <Notice kind="error">
