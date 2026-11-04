@@ -7,7 +7,7 @@ import { join } from "node:path";
 
 const DEFAULT_ENV_FILE = join(homedir(), ".config/agents/keygate.env");
 const MULTI_FLAGS = new Set(["placement", "value", "clear", "scope", "origin", "policy"]);
-const BOOLEAN_FLAGS = new Set(["json", "standby", "help"]);
+const BOOLEAN_FLAGS = new Set(["json", "standby", "help", "all"]);
 
 interface Args {
   positional: string[];
@@ -461,7 +461,8 @@ async function run(): Promise<void> {
       return fail(`unknown credential command "${sub ?? ""}"`);
     }
     case "tokens": {
-      const list = await api<Token[]>("/tokens");
+      const all = await api<Token[]>("/tokens");
+      const list = has("all") ? all : all.filter((t) => !t.revoked_at);
       emit(list, () => table(tokenRows(list)));
       return;
     }
@@ -602,7 +603,7 @@ credentials <slug>                            Credentials of an upstream
 credential add <slug> --label L --value name=VALUE... [--standby]
 credential edit <id> [--label L] [--value name=VALUE...] [--clear name...]
 credential activate|enable|disable|revoke <id>
-tokens                                        List consumer tokens
+tokens [--all]                                List consumer tokens; --all includes revoked ones
 token create --name N --scope SLUG... [--origin O...] [--expires ISO] [--policy NAME[:off]...]
 token update <id> [--name N] [--scope SLUG...] [--origin O...|--origin none] [--expires ISO|none] [--policy NAME[:off]...]
 token enable|disable|rotate|revoke <id>

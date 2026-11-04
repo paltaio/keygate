@@ -3,7 +3,7 @@ import { useLocation } from "wouter";
 import { api, type CreatedToken, type Token, type TokenPolicy } from "../api.ts";
 import { formatDate, formatDateTime, formatRelative, isPast } from "../format.ts";
 import { useAction, useLoad } from "../hooks.ts";
-import { Button, ConfirmDialog, CopyButton, InkBlock, LinkButton, LoadError, Mono, Notice, PageHeader, Panel, Pill, TableMessage, TextLink } from "../ui.tsx";
+import { Button, Checkbox, ConfirmDialog, CopyButton, InkBlock, LinkButton, LoadError, Mono, Notice, PageHeader, Panel, Pill, TableMessage, TextLink } from "../ui.tsx";
 import TokenForm from "./TokenForm.tsx";
 
 function Scopes({ scopes }: { scopes: string[] }) {
@@ -50,6 +50,7 @@ export function TokensPage() {
   const [revoking, setRevoking] = useState<Token | null>(null);
   const [rotating, setRotating] = useState<Token | null>(null);
   const [rotated, setRotated] = useState<CreatedToken | null>(null);
+  const [showRevoked, setShowRevoked] = useState(false);
   const revoke = useAction(async (id: number) => {
     await api.tokens.revoke(id);
     setRevoking(null);
@@ -65,6 +66,8 @@ export function TokensPage() {
     load.reload();
   });
   const data = load.data;
+  const revokedCount = data?.filter((t) => t.revoked_at).length ?? 0;
+  const rows = data && !showRevoked ? data.filter((t) => !t.revoked_at) : data;
 
   return (
     <>
@@ -72,9 +75,14 @@ export function TokensPage() {
         title="Tokens"
         description="What consumers send instead of the provider credential. Each token names the upstreams and browser origins it may use."
         actions={
-          <LinkButton href="/tokens/new" variant="primary">
-            Create token
-          </LinkButton>
+          <>
+            {revokedCount > 0 ? (
+              <Checkbox className="mr-2 self-center" label={`Show revoked (${revokedCount})`} checked={showRevoked} onChange={(e) => setShowRevoked(e.target.checked)} />
+            ) : null}
+            <LinkButton href="/tokens/new" variant="primary">
+              Create token
+            </LinkButton>
+          </>
         }
       />
       {load.error ? <LoadError message={load.error} onRetry={load.reload} /> : null}
@@ -113,11 +121,11 @@ export function TokensPage() {
             </tr>
           </thead>
           <tbody>
-            {data === null ? (
+            {rows === null ? (
               <TableMessage colSpan={8}>{load.error ? "Nothing to show." : "Loading tokens..."}</TableMessage>
-            ) : data.length === 0 ? (
+            ) : rows.length === 0 ? (
               <TableMessage colSpan={8}>
-                <p>No tokens yet. Create one and hand it to a consumer instead of the provider credential.</p>
+                <p>{revokedCount > 0 ? "Every token is revoked." : "No tokens yet."} Create one and hand it to a consumer instead of the provider credential.</p>
                 <div className="mt-3">
                   <LinkButton href="/tokens/new" variant="primary">
                     Create token
@@ -125,7 +133,7 @@ export function TokensPage() {
                 </div>
               </TableMessage>
             ) : (
-              data.map((t) => (
+              rows.map((t) => (
                 <tr key={t.id} className={t.revoked_at ? "text-content-muted" : ""}>
                   <td>
                     <span className="block max-w-[24ch] truncate" title={t.name}>

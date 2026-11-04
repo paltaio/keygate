@@ -65,9 +65,9 @@ mode: `credential add` with the new values (it becomes active), confirm with
 reversible; revoke is not. A credential missing any value is flagged and not
 used.
 
-Tokens: `tokens`, `token create --name N --scope slug [--scope slug]
-[--origin https://app.example] [--expires 2027-01-01T00:00:00Z]`, `token
-update <id> ...`, `token enable|disable <id>`, `token rotate <id>`, `token
+Tokens: `tokens` (`--all` includes revoked ones), `token create --name N
+--scope slug [--scope slug] [--origin https://app.example] [--expires
+2027-01-01T00:00:00Z]`, `token update <id> ...`, `token enable|disable <id>`, `token rotate <id>`, `token
 revoke <id>`. The plaintext appears once in the create or rotate output; hand
 it to the client and do not keep it elsewhere. Rotate keeps the id, scopes,
 origins and expiry and refuses the old value from then on. `--scope '*'` covers every upstream. Origins matter only
