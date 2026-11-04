@@ -38,8 +38,8 @@ The token goes in `X-Keygate-Token`, `Authorization: Bearer`,
 `?keygate_token=`, or wherever the upstream expects its own key. Browser
 callers need an `Origin` on the token's origin list.
 
-`GET /<slug>/llms.txt` needs no token and describes the upstream: base URL,
-token slots and its docs field. `GET /llms.txt` with a token lists the
+`GET /<slug>/llms.txt` with a token scoped to the upstream describes it: base
+URL, token slots and its docs field. `GET /llms.txt` with a token lists the
 upstreams it reaches.
 
 ## Model

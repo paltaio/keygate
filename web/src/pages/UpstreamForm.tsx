@@ -126,7 +126,7 @@ export default function UpstreamForm({ initial, mode, submitLabel, onSubmit }: P
         <Field label="Notes" htmlFor="upstream-notes" hint="Only visible here.">
           <Textarea id="upstream-notes" rows={3} value={form.notes} onChange={(e) => set("notes", e.target.value)} />
         </Field>
-        <Field label="Docs" htmlFor="upstream-docs" hint={`Markdown, readable by anyone at ${window.location.origin}/${form.slug || "slug"}/llms.txt, below the base URL and token lines keygate writes.`}>
+        <Field label="Docs" htmlFor="upstream-docs" hint={`Markdown served at ${window.location.origin}/${form.slug || "slug"}/llms.txt to tokens scoped to this upstream, below the base URL and token lines keygate writes.`}>
           <Textarea id="upstream-docs" mono rows={8} value={form.docs} onChange={(e) => set("docs", e.target.value)} spellCheck={false} />
         </Field>
         {action.error ? (

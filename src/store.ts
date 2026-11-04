@@ -32,7 +32,7 @@ export interface Upstream {
   /** `active`: the one active credential serves every request. `round_robin`: enabled credentials take turns. */
   strategy: Strategy;
   notes: string;
-  /** Markdown served publicly at /<slug>/llms.txt. */
+  /** Markdown served at /<slug>/llms.txt to tokens scoped to the upstream. */
   docs: string;
   created_at: string;
   updated_at: string;

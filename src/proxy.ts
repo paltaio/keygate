@@ -72,7 +72,7 @@ function tokenSlot(p: Placement): string | undefined {
 
 const TOKEN_SLOTS = ["`X-Keygate-Token: kg_...`", "`Authorization: Bearer kg_...`", `\`?${TOKEN_QUERY}=kg_...\``];
 
-/** The public llms.txt for an upstream: how to call it through keygate, followed by its docs. */
+/** The llms.txt for an upstream, served to tokens scoped to it: how to call it through keygate, followed by its docs. */
 export function llmsText(upstream: Upstream, origin: string, publicHost: string | undefined): string {
   const bases = [`${origin}/${upstream.slug}`];
   if (publicHost) bases.push(`https://${upstream.slug}.${publicHost}`);
@@ -103,7 +103,7 @@ export function directoryText(origin: string, upstreams: Upstream[] | undefined)
     `> API proxy at ${origin}. Each upstream is a third-party API reached through keygate with a keygate token (kg_...); keygate adds the provider credential.`,
     "",
     `- Token, any one of: ${TOKEN_SLOTS.join(", ")}`,
-    `- \`${origin}/<slug>/llms.txt\` has an upstream's base URL, where else the token is accepted, and its docs.`,
+    `- \`${origin}/<slug>/llms.txt\` with the same token has an upstream's base URL, where else the token is accepted, and its docs.`,
     "",
     "## Upstreams",
     "",
@@ -243,11 +243,6 @@ export function createProxy(options: ProxyOptions): (req: Request, ip?: string |
       return error(404, "unknown_upstream", "No upstream is configured for this host or path");
     }
 
-    if (target.path === "/llms.txt" && (req.method === "GET" || req.method === "HEAD")) {
-      const text = llmsText(upstream, publicOrigin(env, url), env.KEYGATE_HOST);
-      return new Response(req.method === "HEAD" ? null : text, { headers: { "content-type": "text/plain; charset=utf-8", "access-control-allow-origin": "*" } });
-    }
-
     const origin = req.headers.get("origin");
     if (req.method === "OPTIONS" && origin && req.headers.has("access-control-request-method")) {
       if (!store.originAllowed(upstream.slug, origin)) return error(403, "origin_not_allowed", "No token allows this origin");
@@ -313,6 +308,13 @@ export function createProxy(options: ProxyOptions): (req: Request, ip?: string |
     if (origin) {
       const origins = parseList(token.origins);
       if (!origins.includes("*") && !origins.includes(origin)) return reject(token.id, 403, "origin_not_allowed", "This token does not allow requests from this origin", body.bytes);
+    }
+
+    if (target.path === "/llms.txt" && (req.method === "GET" || req.method === "HEAD")) {
+      const text = llmsText(upstream, publicOrigin(env, url), env.KEYGATE_HOST);
+      return new Response(req.method === "HEAD" ? null : text, {
+        headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store", ...(origin ? corsHeaders(origin, req) : {}) },
+      });
     }
 
     let rawBody: string | ArrayBuffer | undefined = body.raw;

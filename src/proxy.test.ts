@@ -99,11 +99,16 @@ describe("proxy", () => {
     expect(ctx.store.requests({ limit: 10, status: "client_error" })).toHaveLength(0);
   });
 
-  test("llms.txt is public and carries the docs", async () => {
+  test("llms.txt needs a token scoped to the upstream and carries the docs", async () => {
     const upstream = ctx.store.upstreamBySlug("up");
     if (!upstream) throw new Error("upstream missing");
     ctx.store.updateUpstream(upstream.id, { slug: "up", name: "Up", base_url: "https://up.example/base", placements: apiKeyHeader, strategy: "active", notes: "private", docs: "## Search\n\nPOST /v1/search" });
-    const res = await ctx.proxy(new Request("http://keygate.test/up/llms.txt"));
+    const anonymous = await ctx.proxy(new Request("http://keygate.test/up/llms.txt"));
+    expect(anonymous.status).toBe(401);
+    expect(await anonymous.text()).not.toContain("POST /v1/search");
+    const other = ctx.store.createToken({ name: "o", scopes: ["else"], origins: [], expires_at: null }, 1).token;
+    expect((await ctx.proxy(new Request("http://keygate.test/up/llms.txt", { headers: { "x-keygate-token": other } }))).status).toBe(403);
+    const res = await ctx.proxy(new Request("http://keygate.test/up/llms.txt", { headers: { "x-keygate-token": ctx.token } }));
     expect(res.status).toBe(200);
     const text = await res.text();
     expect(text).toStartWith("# Up\n");
@@ -111,7 +116,7 @@ describe("proxy", () => {
     expect(text).toContain("`x-api-key: kg_...`");
     expect(text).toEndWith("## Search\n\nPOST /v1/search\n");
     expect(text).not.toContain("private");
-    const sub = await ctx.proxy(new Request("http://x/llms.txt", { headers: { host: "up.keygate.test" } }));
+    const sub = await ctx.proxy(new Request("http://x/llms.txt", { headers: { host: "up.keygate.test", "x-api-key": ctx.token } }));
     expect(await sub.text()).toBe(text);
     expect(ctx.captured).toHaveLength(0);
   });
@@ -804,7 +809,7 @@ describe("request policies", () => {
     const preflight = await c.proxy(new Request("http://keygate.test/up/x", { method: "OPTIONS", headers: { origin: "https://app.test", "access-control-request-method": "POST" } }));
     expect(preflight.status).toBe(204);
     expect((await call(c, "/x", { headers: { origin: "https://evil.test" } })).status).toBe(403);
-    expect((await c.proxy(new Request("http://keygate.test/up/llms.txt"))).status).toBe(200);
+    expect((await call(c, "/llms.txt")).status).toBe(200);
     const outOfScope = c.store.createToken({ name: "o", scopes: ["else"], origins: [], expires_at: null }, 1);
     c.store.setTokenPolicies(outOfScope.id, [{ policy_id: id, enabled: true }]);
     expect((await call(c, "/x", { token: outOfScope.token })).status).toBe(403);
